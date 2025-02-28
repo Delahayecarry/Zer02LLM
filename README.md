@@ -38,7 +38,7 @@ Zero2LLM 是一个专门面向初学者的大语言模型（LLM）学习项目�
 
 ```bash
 # 克隆项目
-git clone https://github.com/yourusername/Zero2LLM.git
+git clone https://github.com/Delahayecarry/Zero2LLM.git
 
 # 进入项目目录
 cd Zero2LLM
