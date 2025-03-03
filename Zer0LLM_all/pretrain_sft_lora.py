@@ -96,7 +96,8 @@ class Trainer:
         os.makedirs(self.config.out_dir, exist_ok=True)
         torch.manual_seed(1337)
         
-        self.ctx = nullcontext() if "cpu" in self.config.device else torch.amp.autocast()
+        device_type = 'cpu' if 'cpu' in self.config.device else 'cuda'
+        self.ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=getattr(torch, self.config.dtype))
         
         if self.config.use_wandb and (not self.ddp or dist.get_rank() == 0):
             import wandb
@@ -138,7 +139,13 @@ class Trainer:
             norm_topk_prob=self.config.norm_topk_prob
         )
         
-        tokenizer = AutoTokenizer.from_pretrained('./model/zer02llm_tokenizer')
+        tokenizer_path = os.path.abspath('./tokenizer')
+        tokenizer = AutoTokenizer.from_pretrained(
+            tokenizer_path,
+            trust_remote_code=True,
+            local_files_only=True
+        )
+        
         model = LLM(lm_config).to(self.config.device)
         
         # 如果是SFT模式，加载预训练权重
@@ -155,7 +162,26 @@ class Trainer:
         """设置训练相关组件"""
         # 设置数据集
         Dataset = PretrainDataset if self.config.mode == TrainingMode.PRETRAIN else SFTDataset
-        train_ds = Dataset(self.config.data_path, self.tokenizer, max_length=self.config.max_seq_len)
+        
+        # 验证数据文件是否存在
+        if not os.path.exists(self.config.data_path):
+            raise FileNotFoundError(f"数据文件不存在: {self.config.data_path}")
+            
+        try:
+            train_ds = Dataset(self.config.data_path, self.tokenizer, max_length=self.config.max_seq_len)
+            # 验证数据集大小
+            if len(train_ds) == 0:
+                raise ValueError("数据集为空")
+            self.log(f"数据集大小: {len(train_ds)}")
+            
+            # 验证第一个样本
+            sample = train_ds[0]
+            self.log(f"样本输入形状: {sample[0].shape}")
+            self.log(f"样本标签形状: {sample[1].shape}")
+            self.log(f"样本掩码形状: {sample[2].shape}")
+            
+        except Exception as e:
+            raise RuntimeError(f"数据集加载失败: {str(e)}")
         
         # 设置数据加载器
         train_sampler = DistributedSampler(train_ds) if self.ddp else None
@@ -164,14 +190,20 @@ class Trainer:
             batch_size=self.config.batch_size,
             pin_memory=True,
             drop_last=False,
-            shuffle=False,
+            shuffle=(train_sampler is None),
             num_workers=self.config.num_workers,
             sampler=train_sampler
         )
         
         # 设置优化器和梯度缩放器
         self.scaler = torch.amp.GradScaler(enabled=(self.config.dtype in ['float16', 'bfloat16']))
-        self.optimizer = optim.AdamW(self.model.parameters(), lr=self.config.learning_rate)
+        self.optimizer = optim.AdamW(
+            self.model.parameters(),
+            lr=self.config.learning_rate,
+            betas=(0.9, 0.95),
+            eps=1e-8,
+            weight_decay=0.1
+        )
         
         if self.ddp:
             self.model._ddp_params_and_buffers_to_ignore = {"pos_cis"}
@@ -185,9 +217,42 @@ class Trainer:
 
     def train(self) -> None:
         """训练循环"""
+        # 清理 CUDA 缓存并重置
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats()
+            # 重置 CUDA 设备
+            device = torch.device(self.config.device)
+            torch.cuda.set_device(device)
+            
+            # 确保 CUDA 初始化正确
+            try:
+                torch.cuda.init()
+            except RuntimeError:
+                self.log("CUDA 初始化失败，尝试重新初始化...")
+                torch.cuda.empty_cache()
+                torch.cuda.init()
+        
+        # 确保模型在正确的设备上
+        self.model = self.model.to(self.config.device)
+        
+        # 打印当前设备信息
+        self.log(f"训练设备: {self.config.device}")
+        if torch.cuda.is_available():
+            self.log(f"当前GPU内存使用: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
+            self.log(f"最大GPU内存使用: {torch.cuda.max_memory_allocated() / 1024**2:.2f} MB")
+            self.log(f"当前GPU设备索引: {torch.cuda.current_device()}")
+        
         self.iter_per_epoch = len(self.train_loader)
         for epoch in range(self.config.epochs):
-            self.train_epoch(epoch)
+            try:
+                self.train_epoch(epoch)
+            except RuntimeError as e:
+                if "CUDA" in str(e):
+                    self.log("CUDA 错误，尝试恢复训练...")
+                    torch.cuda.empty_cache()
+                    continue
+                raise e
 
     def train_epoch(self, epoch: int) -> None:
         """训练一个epoch"""
@@ -195,41 +260,65 @@ class Trainer:
         start_time = time.time()
         
         for step, (X, Y, loss_mask) in enumerate(self.train_loader):
-            X = X.to(self.config.device)
-            Y = Y.to(self.config.device)
-            loss_mask = loss_mask.to(self.config.device)
+            try:
+                # 确保输入数据维度正确
+                if X.dim() != 2:
+                    X = X.view(X.size(0), -1)
+                if Y.dim() != 2:
+                    Y = Y.view(Y.size(0), -1)
+                
+                # 将数据移动到设备
+                X = X.to(self.config.device)
+                Y = Y.to(self.config.device)
+                loss_mask = loss_mask.to(self.config.device)
 
-            # 更新学习率
-            lr = self.get_lr(epoch * self.iter_per_epoch + step, self.config.epochs * self.iter_per_epoch)
-            for param_group in self.optimizer.param_groups:
-                param_group['lr'] = lr
+                # 更新学习率
+                lr = self.get_lr(epoch * self.iter_per_epoch + step, self.config.epochs * self.iter_per_epoch)
+                for param_group in self.optimizer.param_groups:
+                    param_group['lr'] = lr
 
-            with self.ctx:
-                res = self.model(X)
-                loss = loss_fct(
-                    res.logits.view(-1, res.logits.size(-1)),
-                    Y.view(-1)
-                ).view(Y.size())
-                loss = (loss * loss_mask).sum() / loss_mask.sum()
-                loss += res.aux_loss
-                loss = loss / self.config.accumulation_steps
+                # 使用 autocast 进行混合精度训练
+                with self.ctx:
+                    # 同步 GPU
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                    
+                    res = self.model(X)
+                    loss = loss_fct(
+                        res.logits.view(-1, res.logits.size(-1)),
+                        Y.view(-1)
+                    ).view(Y.size())
+                    loss = (loss * loss_mask).sum() / loss_mask.sum()
+                    loss += res.aux_loss
+                    loss = loss / self.config.accumulation_steps
 
-            self.scaler.scale(loss).backward()
+                self.scaler.scale(loss).backward()
 
-            if (step + 1) % self.config.accumulation_steps == 0:
-                self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
+                if (step + 1) % self.config.accumulation_steps == 0:
+                    self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
 
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
 
-                self.optimizer.zero_grad(set_to_none=True)
+                    self.optimizer.zero_grad(set_to_none=True)
+                    
+                    # 同步 GPU
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
 
-            if step % self.config.log_interval == 0:
-                self.log_progress(epoch, step, loss, start_time)
+                if step % self.config.log_interval == 0:
+                    self.log_progress(epoch, step, loss, start_time)
 
-            if (step + 1) % self.config.save_interval == 0:
-                self.save_checkpoint()
+                if (step + 1) % self.config.save_interval == 0:
+                    self.save_checkpoint()
+                    
+            except RuntimeError as e:
+                if "CUDA" in str(e):
+                    self.log(f"步骤 {step} CUDA 错误: {str(e)}")
+                    torch.cuda.empty_cache()
+                    continue
+                raise e
 
     def log_progress(self, epoch: int, step: int, loss: torch.Tensor, start_time: float) -> None:
         """记录训练进度"""
@@ -397,4 +486,9 @@ def main():
         trainer.train()
 
 if __name__ == "__main__":
+    print(f"CUDA是否可用: {torch.cuda.is_available()}")
+    print(f"当前CUDA版本: {torch.version.cuda}")
+    print(f"GPU设备数量: {torch.cuda.device_count()}")
+    print(f"当前GPU设备: {torch.cuda.current_device()}")
+    print(f"GPU设备名称: {torch.cuda.get_device_name(0)}")
     main()
