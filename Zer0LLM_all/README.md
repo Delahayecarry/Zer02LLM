@@ -1,6 +1,6 @@
-# Zer02LLM_all
+# Zer02LLM
 
-一个轻量级的 LLM (Large Language Model) 实现项目，专注于模型训练和推理优化。
+一个轻量级的大语言模型(LLM)训练和推理框架，专注于高效实现和性能优化。
 
 ## 项目特点
 
@@ -11,67 +11,93 @@
 - 📦 模块化设计，易于扩展
 - 🛠 内置性能优化机制
 - 🔤 支持自定义 tokenizer
+- 📊 支持 Wandb 实验追踪
+- 🔄 支持流式推理输出
+- 💾 支持梯度累积和混合精度训练
 
 ## 目录结构
 
 ```
 Zer02LLM_all/
-├── model/              # 模型相关代码
-│   ├── model.py       # 核心模型实现
-│   └── LLMconfig.py   # 模型配置类
-├── tokenizer/         # tokenizer 相关文件
+├── model/                # 模型相关代码
+│   ├── model.py         # 核心模型实现
+│   └── LLMconfig.py     # 模型配置类
+├── tokenizer/           # tokenizer 相关文件
 │   ├── tokenizer.json
 │   ├── tokenizer_config.json
 │   ├── vocab.json
 │   └── merges.txt
-├── datasets.py        # 数据集处理
-├── pretrain_sft_lora.py  # 训练脚本
-└── README.md
+├── datasets.py          # 数据集处理
+├── pretrain_sft_lora.py # 训练脚本
+├── eval_model.py        # 评估脚本
+├── requirements.txt     # 依赖包列表
+└── README.md           # 项目说明文档
 ```
 
-## 核心功能
+## 快速开始
 
-- **高效注意力机制**: 实现了包含 Flash Attention 在内的优化注意力计算
-- **MoE 专家系统**: 支持动态路由和专家选择
-- **位置编码优化**: 采用 RoPE 进行位置信息编码
-- **灵活的模型配置**: 支持自定义模型参数和结构
-- **流式生成**: 支持文本的流式生成输出
-- **自定义 Tokenizer**: 支持使用自定义的 tokenizer 进行训练
+### 1. 环境准备
 
-## 环境准备
+```bash
+# 创建虚拟环境
+python -m venv venv
+source venv/bin/activate  # Linux/Mac
+# 或
+.\venv\Scripts\activate  # Windows
 
-### 必要文件和目录
+# 安装依赖
+pip install -r requirements.txt
+```
+
+### 2. 数据准备
+
+确保以下文件/目录存在：
 - `./tokenizer/` - tokenizer目录（包含必要的tokenizer文件）
 - `./dataset/pretrain_hq.jsonl` - 预训练数据文件
 - `./out/` - 模型输出目录（会自动创建）
 
-### 安装依赖
-```bash
-pip install -r requirements.txt
-```
-
-## 训练指南
-
-### 基础训练命令
+### 3. 模型训练
 
 ```bash
 # CPU训练（测试用）
-python pretrain_sft_lora.py --device cpu --mode pretrain --batch_size 2 --epochs 1 --dim 128 --n_layers 2 --max_seq_len 128 --n_heads 4 --data_path ./datasets/pretrain_hq.jsonl
+python pretrain_sft_lora.py --device cpu --mode pretrain --batch_size 2 --epochs 1 --dim 128 --n_layers 2 --max_seq_len 128 --n_heads 4
 
-# GPU预训练
-python pretrain_sft_lora.py --mode pretrain --batch_size 32 --epochs 1 --learning_rate 5e-4 --dim 512 --n_layers 8 --data_path ./datasets/pretrain_hq.jsonl
+# GPU训练（单卡）
+python pretrain_sft_lora.py --mode pretrain --batch_size 32 --epochs 1 --learning_rate 5e-4 --dim 512 --n_layers 8
 
-# SFT微调
-python pretrain_sft_lora.py --mode sft --batch_size 32 --epochs 1 --learning_rate 5e-4 --dim 512 --n_layers 8 --data_path ./datasets/sft_data.jsonl
-
-# MoE模型训练
-python pretrain_sft_lora.py --mode pretrain --use_moe --n_routed_experts 8 --num_experts_per_tok 2 --batch_size 32 --dim 512 --n_layers 8
-
-# 分布式训练
+# 分布式训练（多卡）
 torchrun --nproc_per_node=2 pretrain_sft_lora.py --mode pretrain --ddp --batch_size 16
 ```
 
-### 显存优化配置
+### 4. 模型评估
+
+```bash
+# 评估预训练模型
+python eval_model.py --model_mode 0 --dim 512 --n_layers 8
+
+# 评估SFT模型（带流式输出）
+python eval_model.py --model_mode 1 --dim 512 --n_layers 8 --stream True
+```
+
+## 核心功能说明
+
+### 1. 训练模式
+- **预训练 (Pretrain)**: 从头训练模型
+- **监督微调 (SFT)**: 基于预训练模型进行对话能力训练
+
+### 2. 模型特性
+- **注意力机制**: 支持标准注意力和 Flash Attention
+- **位置编码**: 使用 RoPE 进行位置信息编码
+- **MoE结构**: 支持动态路由和专家选择
+- **混合精度**: 支持 FP16/BF16 训练
+
+### 3. 优化特性
+- **梯度累积**: 支持大批量训练
+- **分布式训练**: 支持多GPU训练
+- **性能监控**: 支持 Wandb 实验追踪
+- **流式生成**: 支持流式文本生成
+
+## 显存优化配置
 
 ```bash
 # 16GB显存配置
@@ -80,30 +106,9 @@ python pretrain_sft_lora.py --mode pretrain --dim 512 --n_layers 8 --batch_size 
 # 24GB显存配置
 python pretrain_sft_lora.py --mode pretrain --dim 768 --n_layers 12 --batch_size 24 --accumulation_steps 8
 
-# 40GB+显存配置
+# 40GB显存配置
 python pretrain_sft_lora.py --mode pretrain --dim 1024 --n_layers 16 --batch_size 32 --accumulation_steps 4
 ```
-
-### 重要参数说明
-
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| --dim | 模型维度 | 512 |
-| --n_layers | 模型层数 | 8 |
-| --max_seq_len | 最大序列长度 | 512 |
-| --batch_size | 批次大小 | 32 |
-| --accumulation_steps | 梯度累积步数 | 8 |
-| --learning_rate | 学习率 | 5e-4 |
-
-### 训练监控
-- 使用wandb监控：`--use_wandb`
-- 日志间隔：`--log_interval`
-- 保存间隔：`--save_interval`
-
-### 模型保存
-- 预训练模型：`out/pretrain_{dim}.pth`
-- SFT模型：`out/sft_{dim}.pth`
-- MoE模型：添加`_moe`后缀
 
 ## 常见问题解决
 
@@ -117,11 +122,31 @@ python pretrain_sft_lora.py --mode pretrain --dim 1024 --n_layers 16 --batch_siz
 - 启用 Flash Attention
 - 使用分布式训练
 - 优化数据加载（增加 num_workers）
+- 使用混合精度训练
 
 ### 3. 训练稳定性
 - 调整学习率
 - 使用 warmup
 - 启用梯度裁剪
+- 调整 batch_size 和 accumulation_steps
+
+## 参数说明
+
+### 模型参数
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| dim | 隐藏层维度 | 512 |
+| n_layers | 层数 | 8 |
+| n_heads | 注意力头数 | 8 |
+| max_seq_len | 最大序列长度 | 2048 |
+
+### 训练参数
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| learning_rate | 学习率 | 5e-4 |
+| batch_size | 批次大小 | 32 |
+| accumulation_steps | 梯度累积步数 | 8 |
+| epochs | 训练轮数 | 1 |
 
 ## 开源协议
 

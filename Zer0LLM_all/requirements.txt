@@ -1,35 +1,36 @@
 # 核心依赖
-torch>=2.0.0
-transformers>=4.30.0
+torch>=2.1.0
+transformers>=4.36.0
 numpy>=1.24.0
-pandas>=2.0.0
+pandas>=2.1.0
 
-# 数据处理和工具
-datasets>=2.12.0
-tokenizers>=0.13.3
+# 数据处理
+datasets>=2.15.0
+tokenizers>=0.15.0
 sentencepiece>=0.1.99
 jsonlines>=3.1.0
-tqdm>=4.65.0
+tqdm>=4.66.0
 
 # 分布式训练
 torch-distributed>=0.0.1
 
 # 性能优化
-flash-attn>=2.0.0  # 可选，取决于是否使用 Flash Attention
+flash-attn>=2.3.0  # 可选，用于Flash Attention优化
 bitsandbytes>=0.41.0  # 用于量化和优化
-accelerate>=0.20.0
+accelerate>=0.25.0  # 用于分布式训练和混合精度
 
 # 日志和可视化
-wandb>=0.15.0  # 可选，用于实验跟踪
-tensorboard>=2.13.0
+wandb>=0.16.0  # 可选，用于实验追踪
+tensorboard>=2.15.0
+rich>=13.7.0  # 用于更好的终端输出
 
-# 开发工具
-pytest>=7.3.1
-black>=23.3.0
-isort>=5.12.0
-pylint>=2.17.0
+# 工具和开发
+pytest>=7.4.0  # 用于测试
+black>=23.12.0  # 代码格式化
+isort>=5.13.0  # import排序
+pylint>=3.0.0  # 代码检查
+typer>=0.9.0  # 命令行接口
 
 # 其他工具
-pyyaml>=6.0.0
-rich>=13.0.0  # 用于更好的终端输出
-typer>=0.9.0  # 用于命令行接口 
+pyyaml>=6.0.1  # 配置文件处理
+einops>=0.7.0  # 张量操作 
