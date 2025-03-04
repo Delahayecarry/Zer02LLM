@@ -100,6 +100,9 @@ class TestLLMComponents(unittest.TestCase):
         print(f"输出张量形状: {out.shape}")
         print(f"辅助损失值: {moe_ffn.aux_loss.item() if hasattr(moe_ffn, 'aux_loss') else None}")
         self.assertEqual(out.shape, x.shape)
+        self.assertLess(moe_ffn.aux_loss, 0.1)  # 添加上限验证
+        self.assertGreater(moe_ffn.aux_loss, 0.05)  # 添加下限验证
+
 
     def test_llm_block(self):
         """测试LLM Block"""
@@ -172,4 +175,12 @@ def run_tests():
     unittest.main(argv=[''], verbosity=2)
 
 if __name__ == '__main__':
-    run_tests() 
+    # 测试cuBLAS
+    from torch import cublas
+    try:
+        cublas.check_blas()
+        print("cuBLAS初始化成功")
+        run_tests()
+    except Exception as e:
+        print("cuBLAS初始化失败:", e)
+        run_tests() 

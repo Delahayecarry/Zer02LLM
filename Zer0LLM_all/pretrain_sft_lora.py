@@ -58,7 +58,7 @@ class TrainingConfig:
     dim: int = 512
     n_layers: int = 8
     max_seq_len: int = 512
-    vocab_size: int = 2048
+    vocab_size: int = 4000
     n_heads: int = 8
     n_kv_heads: Optional[int] = None
     rope_theta: float = 10000.0
@@ -139,12 +139,14 @@ class Trainer:
             norm_topk_prob=self.config.norm_topk_prob
         )
         
-        tokenizer_path = os.path.abspath('./tokenizer')
+        tokenizer_path = os.path.join(os.path.dirname(__file__), 'tokenizer')
         tokenizer = AutoTokenizer.from_pretrained(
             tokenizer_path,
             trust_remote_code=True,
             local_files_only=True
         )
+        # 更新vocab_size以匹配tokenizer的词表大小
+        lm_config.vocab_size = len(tokenizer)
         
         model = LLM(lm_config).to(self.config.device)
         
@@ -217,8 +219,8 @@ class Trainer:
 
     def train(self) -> None:
         """训练循环"""
-        # 清理 CUDA 缓存并重置
-        if torch.cuda.is_available():
+        # 清理缓存并重置
+        if torch.cuda.is_available() and 'cuda' in self.config.device:
             torch.cuda.empty_cache()
             torch.cuda.reset_peak_memory_stats()
             # 重置 CUDA 设备
@@ -238,7 +240,7 @@ class Trainer:
         
         # 打印当前设备信息
         self.log(f"训练设备: {self.config.device}")
-        if torch.cuda.is_available():
+        if torch.cuda.is_available() and 'cuda' in self.config.device:
             self.log(f"当前GPU内存使用: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
             self.log(f"最大GPU内存使用: {torch.cuda.max_memory_allocated() / 1024**2:.2f} MB")
             self.log(f"当前GPU设备索引: {torch.cuda.current_device()}")
@@ -491,4 +493,5 @@ if __name__ == "__main__":
     print(f"GPU设备数量: {torch.cuda.device_count()}")
     print(f"当前GPU设备: {torch.cuda.current_device()}")
     print(f"GPU设备名称: {torch.cuda.get_device_name(0)}")
+    
     main()

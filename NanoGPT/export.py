@@ -2,7 +2,7 @@ import os
 import torch
 import argparse
 import json
-from model import GPT, GPTconfig
+from cankao import GPT, GPTconfig
 from transformers import PreTrainedTokenizerFast, GPT2Config, GPT2LMHeadModel
 import onnx
 import onnxruntime as ort

@@ -5,7 +5,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, random_split
 from transformers import get_linear_schedule_with_warmup
-from model import GPT, GPTconfig
+from cankao import GPT, GPTconfig
 from data import TextDataset
 
 # 创建保存目录

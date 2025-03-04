@@ -139,6 +139,7 @@ class DPODataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, index):
+        
         item = self.data[index]
         chosen = item['chosen']  # 是一个 list，里面包含若干 {role, content}
         rejected = item['rejected']  # 同上

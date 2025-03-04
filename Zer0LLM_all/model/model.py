@@ -59,11 +59,12 @@ class Attention(nn.Module):
     def __init__(self, args: LLMconfig):
         super().__init__()
         self.n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
-        assert args.n_heads % self.n_kv_heads == 0
+        assert args.n_heads % self.n_kv_heads == 0, f"n_heads ({args.n_heads}) must be divisible by n_kv_heads ({self.n_kv_heads})"
         self.n_local_heads = args.n_heads
         self.n_local_kv_heads = self.n_kv_heads
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
         self.head_dim = args.dim // args.n_heads
+        assert args.dim % args.n_heads == 0, f"dim ({args.dim}) must be divisible by n_heads ({args.n_heads})"
         
         # 线性变换层
         self.wq = nn.Linear(args.dim, args.n_heads * self.head_dim, bias=False)
@@ -88,53 +89,61 @@ class Attention(nn.Module):
         self.register_buffer("mask", mask, persistent=False)
 
     def forward(self,
-                x: torch.Tensor,
-                pos_cis: torch.Tensor,
-                past_key_value: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+                x: torch.Tensor,  # shape: (batch_size, seq_len, dim)
+                pos_cis: torch.Tensor,  # shape: (seq_len, head_dim//2)
+                past_key_value: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # shape: ((batch_size, past_len, n_kv_heads, head_dim), (batch_size, past_len, n_kv_heads, head_dim))
                 use_cache: bool = False):
-        bsz, seq_len, _ = x.shape
+        bsz, seq_len, dim = x.shape
+        assert dim == self.wq.in_features, f"Input dimension {dim} doesn't match layer dimension {self.wq.in_features}"
         
         # 1. 线性变换
-        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
+        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)  
         
         # 2. 重塑维度
-        xq = xq.view(bsz, seq_len, self.n_local_heads, self.head_dim)
-        xk = xk.view(bsz, seq_len, self.n_local_kv_heads, self.head_dim)
-        xv = xv.view(bsz, seq_len, self.n_local_kv_heads, self.head_dim)
+        xq = xq.view(bsz, seq_len, self.n_local_heads, self.head_dim)  
+        xk = xk.view(bsz, seq_len, self.n_local_kv_heads, self.head_dim)  
+        xv = xv.view(bsz, seq_len, self.n_local_kv_heads, self.head_dim)  
         
         # 3. 应用旋转位置编码
-        xq, xk = apply_rotary_emb(xq, xk, pos_cis)
+        assert pos_cis.shape == (seq_len, self.head_dim//2), f"pos_cis shape {pos_cis.shape} doesn't match expected shape ({seq_len}, {self.head_dim//2})"
+        xq, xk = apply_rotary_emb(xq, xk, pos_cis)  
         
         # 4. KV缓存处理
         if past_key_value is not None:
-            xk = torch.cat([past_key_value[0], xk], dim=1)
-            xv = torch.cat([past_key_value[1], xv], dim=1)
+            assert past_key_value[0].shape[1] + seq_len <= self.mask.shape[-1], "Sequence length too long"
+            xk = torch.cat([past_key_value[0], xk], dim=1)  
+            xv = torch.cat([past_key_value[1], xv], dim=1)  
         past_kv = (xk, xv) if use_cache else None
         
         # 5. 准备注意力计算
-        xq = xq.transpose(1, 2)
-        xk = repeat_kv(xk, self.n_rep).transpose(1, 2)
-        xv = repeat_kv(xv, self.n_rep).transpose(1, 2)
+        xk = repeat_kv(xk, self.n_rep)  
+        xv = repeat_kv(xv, self.n_rep)  
+        
+        xq = xq.transpose(1, 2)  
+        xk = xk.transpose(1, 2)  
+        xv = xv.transpose(1, 2)  
         
         # 6. 注意力计算
         if self.flash and seq_len > 1:
             dropout_p = self.dropout if self.training else 0.0
             output = F.scaled_dot_product_attention(
-                xq, xk, xv,
+                xq, xk, xv,  
                 attn_mask=None,
                 dropout_p=dropout_p,
                 is_causal=True
-            )
+            )  
         else:
-            scores = (xq @ xk.transpose(-2, -1)) / math.sqrt(self.head_dim)
-            scores = scores + self.mask[:, :, :seq_len, :seq_len]
-            scores = F.softmax(scores.float(), dim=-1).type_as(xq)
-            scores = self.attn_dropout(scores)
-            output = scores @ xv
+            scores = (xq @ xk.transpose(-2, -1)) / math.sqrt(self.head_dim)  
+            # 添加维度校验
+            assert xq.shape[-1] == xk.shape[-1], f"Query and Key dimensions do not match: {xq.shape} vs {xk.shape}"
+            scores = scores + self.mask[:, :, :seq_len, :seq_len]  
+            scores = F.softmax(scores.float(), dim=-1).type_as(xq)  
+            scores = self.attn_dropout(scores)  
+            output = scores @ xv  
         
         # 7. 输出处理
-        output = output.transpose(1, 2).reshape(bsz, seq_len, -1)
-        output = self.resid_dropout(self.wo(output))
+        output = output.transpose(1, 2).reshape(bsz, seq_len, -1)  
+        output = self.resid_dropout(self.wo(output))  
         
         return output, past_kv
 
@@ -142,30 +151,34 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     """KV头部复用函数
     
     Args:
-        x: shape (batch, n_kv_heads, seq_len, head_dim)
+        x: shape (batch_size, seq_len, n_kv_heads, head_dim)
         n_rep: 每个KV head被复用的次数
         
     Returns:
-        shape (batch, n_heads, seq_len, head_dim)
+        shape (batch_size, seq_len, n_heads, head_dim)
     """
-    batch_size, seq_len, n_kv_heads, head_dim = x.size()
-
     if n_rep == 1:
-        return x 
+        return x
+        
+    batch_size, seq_len, n_kv_heads, head_dim = x.size()
+    
     return (
-        x[:, :, :, None, :]
-        .expand(batch_size, seq_len, n_kv_heads, n_rep, head_dim)
-        .reshape(batch_size, seq_len, n_kv_heads * n_rep, head_dim)
+        x[:, :, :, None, :]  # (batch_size, seq_len, n_kv_heads, 1, head_dim)
+        .expand(batch_size, seq_len, n_kv_heads, n_rep, head_dim)  # (batch_size, seq_len, n_kv_heads, n_rep, head_dim)
+        .reshape(batch_size, seq_len, n_kv_heads * n_rep, head_dim)  # (batch_size, seq_len, n_heads, head_dim)
     )
     
 
 class MOEgate(nn.Module):
     def __init__(self, config: LLMconfig):
         super().__init__()
+        assert config.n_routed_experts >= config.num_experts_per_tok, f"专家数量({config.n_routed_experts})必须大于等于每token选择的专家数({config.num_experts_per_tok})"
+        
+        
         self.config = config
         self.top_k = config.num_experts_per_tok
         self.num_experts = config.num_experts
-        self.nrom_topk_experts = config.norm_topk_experts
+        self.norm_topk_experts = config.norm_topk_experts
         self.seq_aux = config.seq_aux
         self.n_routed_experts = config.n_routed_experts
 
@@ -202,7 +215,10 @@ class MOEgate(nn.Module):
         top_k_weights, top_k_idx = torch.topk(scores, k=self.top_k, dim=-1, sorted=False)
         # top_k_weights的shape: (batch_size * seq_len, top_k)
         # top_k_idx的shape: (batch_size * seq_len, top_k)
-        if self.top_k > 1 and self.nrom_topk_experts: # 如果top_k大于1且需要归一化
+
+        
+
+        if self.top_k > 1 and self.norm_topk_experts: # 如果top_k大于1且需要归一化
             denominator = top_k_weights.sum(dim=-1, keepdim=True) + 1e-20
             top_k_weights = top_k_weights / denominator
 
@@ -236,9 +252,17 @@ class MOEgate(nn.Module):
     def _select_top_k_experts(self, scores):
         top_k_weights, top_k_idx = torch.topk(
             scores, self.top_k, dim=-1, sorted=False
-        )
-        
-        if self.top_k > 1 and self.nrom_topk_experts:
+        )[1] % self.n_routed_experts
+        # 取模运算符 % 用于确保索引在有效范围内
+        # 例如，如果 n_routed_experts = 8，top_k_idx = 10，则 10 % 8 = 2
+        # 因此，top_k_idx 将被限制在 0 到 7 之间
+        # 如果 top_k_idx 大于 n_routed_experts，取模运算符 % 会将其转换为有效范围内的索引
+        # 例如，如果 n_routed_experts = 8，top_k_idx = 10，则 10 % 8 = 2
+        # 因此，top_k_idx 将被限制在 0 到 7 之间
+        # 如果 top_k_idx 小于 0，取模运算符 % 会将其转换为有效范围内的索引
+        # 例如，如果 n_routed_experts = 8，top_k_idx = -1，则 -1 % 8 = 7
+        # 因此，top_k_idx 将被限制在 0 到 7 之间
+        if self.top_k > 1 and self.norm_topk_experts:
             top_k_weights = top_k_weights / (
                 top_k_weights.sum(dim=-1, keepdim=True) + 1e-6
             )
@@ -283,8 +307,8 @@ class MoEFFN(nn.Module):
         # x的shape: (batch_size, seq_len, dim)
         
         topk_idx, topk_weights, aux_loss = self.gate(x)
-        # topk_idx的shape: (batch_size, seq_len, top_k)
         # topk_weights的shape: (batch_size, seq_len, top_k)
+        # topk_idx的shape: (batch_size, seq_len, top_k)
         # aux_loss的shape: scalar   
         x = x.view(-1, x.shape[-1])
         # x的shape: (batch_size * seq_len, dim)
@@ -311,7 +335,7 @@ class MoEFFN(nn.Module):
         self.aux_loss = aux_loss
         return y
     @torch.no_grad()
-    def moe_infer(self, x, flat_experts_id, flat_exeprt_weights):
+    def moe_infer(self, x, flat_experts_id, flat_exrprt_weights):
         # 推理
         expert_cache = torch.zeros_like(x)
         idxs = flat_experts_id.argsort() 
@@ -325,7 +349,7 @@ class MoEFFN(nn.Module):
             exp_token_idx = tokens_id[start_idx:end_idx]
             expert_tokens = x[exp_token_idx]
             expert_out = expert(expert_tokens).to(expert_cache.dtype)
-            expert_out.mul_(flat_exeprt_weights[idxs[start_idx:end_idx]])
+            expert_out.mul_(flat_exrprt_weights[idxs[start_idx:end_idx]])
             # 使用scatter_add_操作 #原地操作scatter_add_ #scatter_add不是原地操作
             expert_cache.scatter_add_(0, exp_token_idx.view(-1, 1).repeat(1, x.shape[-1]), expert_out)
         return expert_cache
@@ -374,7 +398,8 @@ def apply_rotary_emb(xq, xk, pos_cis):
     def unite_shape(pos_cis, x):
         ndim = x.ndim
         assert 0 <= 1 < ndim
-        assert pos_cis.shape == (x.shape[1], x.shape[-1]) # x的shape: (batch_size, seq_len, n_heads, head_dim)
+        assert pos_cis.shape == (x.shape[1], x.shape[-1]), \
+            f"Position encoding shape {pos_cis.shape} does not match required shape {(x.shape[1], x.shape[-1])}"
         shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
         return pos_cis.view(*shape)
 
@@ -469,6 +494,8 @@ class LLM(PreTrainedModel):
                 past_key_values: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None,
                 use_cache: bool = False,
                 **args):
+        assert input_ids is not None, "input_ids cannot be None"
+        assert input_ids.dim() == 2, f"Expected input_ids to have 2 dimensions, got {input_ids.dim()}"
         # 1. 输入处理
         past_key_values = past_key_values or [None] * len(self.layers)
         start_pos = args.get('start_pos', 0)
@@ -564,3 +591,4 @@ class LLM(PreTrainedModel):
             yield input_ids[:, start:]
             if input_ids_next.item() == eos_token_id:
                 break
+
