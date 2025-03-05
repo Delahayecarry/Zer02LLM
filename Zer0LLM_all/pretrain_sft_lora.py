@@ -153,7 +153,8 @@ class Trainer:
         # 如果是SFT模式，加载预训练权重
         if self.config.mode == TrainingMode.SFT:
             moe_path = '_moe' if lm_config.use_moe else ''
-            ckp = f'./out/pretrain_{lm_config.dim}{moe_path}.pth'
+            # ckp = f'./out/pretrain_{lm_config.dim}{moe_path}.pth' # 预训练模型 尽量减少一键训练
+            ckp = f'./out/Zero2LLM-v1-0.02B-pretrained.pth' # 预训练模型 尽量减少一键训练
             state_dict = torch.load(ckp, map_location=self.config.device)
             model.load_state_dict(state_dict, strict=False)
             
