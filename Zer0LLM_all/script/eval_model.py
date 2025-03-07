@@ -22,6 +22,8 @@ def init_model(args):
     moe_path = '_moe' if args.use_moe else ''
     modes = {0: 'pretrain', 1: 'sft'}
     ckp = f'./{args.out_dir}/{modes[args.model_mode]}_{args.dim}{moe_path}.pth'
+    
+    print(f'正在加载模型: {ckp}')
 
     model = LLM(LLMconfig(
         dim=args.dim,
@@ -66,7 +68,7 @@ def get_prompt_datas(args):
             '强化学习的核心思想'
         ]
     else:
-        # 对话测试问题
+        # 对话测试问题（适用于SFT和RL模型）
         prompt_datas = [
             '请介绍一下自己。',
             '你的训练数据来自哪里？',

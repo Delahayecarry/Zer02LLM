@@ -71,12 +71,14 @@ st.markdown("""
 
 # 全局变量
 system_prompt = []
-device = "cuda" if torch.cuda.is_available() else "cpu"
+# device = "cuda" if torch.cuda.is_available() else "cpu"
+device = "cpu" 
 
 # 模型路径映射
 MODEL_PATHS = {
     "Zero2LLM-v1-pretrain-0.02B": ["../Zer02LLM-v1-pretrain-0.02B", "Zero2LLM-v1-pretrain-0.02B"],
-    "Zero2LLM-v1-sft-0.02B": ["../Zer02LLM-v1-sft-0.02B", "Zero2LLM-v1-sft-0.02B"]
+    "Zero2LLM-v1-sft-0.02B": ["../Zer02LLM-v1-sft-0.02B", "Zero2LLM-v1-sft-0.02B"],
+    "Zero2LLM-v1-dpo-0.02B": ["../Zer02LLM-v1-dpo-0.02B", "Zero2LLM-v1-dpo-0.02B"]
 }
 
 def setup_seed(seed):

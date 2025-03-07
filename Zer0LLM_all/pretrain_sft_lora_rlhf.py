@@ -5,25 +5,56 @@ import math
 import warnings
 import unittest
 import torch
+import torch.nn.functional as F
 import torch.distributed as dist
 from torch import optim, nn
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, DistributedSampler
 from contextlib import nullcontext
 from transformers import AutoTokenizer
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, List
 from dataclasses import dataclass
 from enum import Enum
 
 from model.model import LLM
 from model.LLMconfig import LLMconfig
-from datasets import PretrainDataset, SFTDataset
+from datasets import PretrainDataset, SFTDataset, DPODataset
 
 warnings.filterwarnings('ignore')
+
+def logits_to_probs(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    """将logits转换为概率"""
+    # logits shape: (batch_size, seq_len, vocab_size)
+    # labels shape: (batch_size, seq_len)
+    # probs shape: (batch_size, seq_len)
+    log_probs = F.log_softmax(logits, dim=2)
+    probs = torch.gather(log_probs, dim=2, index=labels.unsqueeze(2)).squeeze(-1)
+    return probs
+
+def dpo_loss(ref_probs: torch.Tensor, probs: torch.Tensor, beta: float) -> torch.Tensor:
+    """计算DPO损失"""
+    # ref_probs 和 probs 都是 shape: (batch_size, seq_len)
+    # 计算每个样本的平均概率
+    ref_probs = ref_probs.mean(dim=1)
+    probs = probs.mean(dim=1)
+
+    # 将 chosen 和 rejected 数据分开
+    batch_size = ref_probs.shape[0]
+    chosen_ref_probs = ref_probs[:batch_size // 2]
+    reject_ref_probs = ref_probs[batch_size // 2:]
+    chosen_probs = probs[:batch_size // 2]
+    reject_probs = probs[batch_size // 2:]
+
+    pi_logratios = chosen_probs - reject_probs
+    ref_logratios = chosen_ref_probs - reject_ref_probs
+    logits = pi_logratios - ref_logratios
+    loss = -F.logsigmoid(beta * logits)
+    return loss.mean()
 
 class TrainingMode(Enum):
     PRETRAIN = "pretrain"
     SFT = "sft"
+    DPO = "dpo"
     TEST = "test"
 
 @dataclass
@@ -43,6 +74,12 @@ class TrainingConfig:
     wandb_project: str = "Zer02LLM"
     log_interval: int = 100
     save_interval: int = 100
+    
+    # 模型保存相关
+    save_best_only: bool = True  # 是否只保存最佳模型
+    save_last: bool = True  # 是否保存最后一个epoch的模型
+    save_interval_steps: int = 1000  # 每多少步保存一次模型
+    keep_checkpoint_max: int = 5  # 最多保存多少个检查点
     
     # 分布式训练
     num_workers: int = 1
@@ -77,6 +114,10 @@ class TrainingConfig:
     seq_aux: bool = True
     norm_topk_prob: bool = True
     
+    # DPO相关参数
+    dpo_beta: float = 0.1  # DPO loss的beta参数
+    ref_model_path: Optional[str] = None  # 参考模型路径
+    
     # 数据路径
     data_path: str = "./dataset/pretrain_hq.jsonl"
 
@@ -86,6 +127,11 @@ class Trainer:
         self.setup_environment()
         self.model, self.tokenizer = self.init_model()
         self.setup_training()
+        
+        # 初始化模型保存相关变量
+        self.best_loss = float('inf')
+        self.current_step = 0
+        self.saved_checkpoints = []  # 保存已保存的检查点路径
 
     def setup_environment(self) -> None:
         """设置训练环境"""
@@ -150,13 +196,22 @@ class Trainer:
         
         model = LLM(lm_config).to(self.config.device)
         
-        # 如果是SFT模式，加载预训练权重
-        if self.config.mode == TrainingMode.SFT:
+        # 如果是SFT或DPO模式，加载预训练权重
+        if self.config.mode in [TrainingMode.SFT, TrainingMode.DPO]:
             moe_path = '_moe' if lm_config.use_moe else ''
-            # ckp = f'./out/pretrain_{lm_config.dim}{moe_path}.pth' # 预训练模型 尽量减少一键训练
-            ckp = f'./out/Zero2LLM-v1-0.02B-pretrained.pth' # 预训练模型 尽量减少一键训练
+            if self.config.mode == TrainingMode.SFT:
+                ckp = f'./out/Zero2LLM-v1-0.02B-pretrained.pth'
+            else:  # DPO模式
+                ckp = f'./out/full_sft_{lm_config.dim}{moe_path}.pth'
             state_dict = torch.load(ckp, map_location=self.config.device)
             model.load_state_dict(state_dict, strict=False)
+            
+            # 如果是DPO模式，还需要初始化参考模型
+            if self.config.mode == TrainingMode.DPO:
+                self.ref_model = LLM(lm_config).to(self.config.device)
+                self.ref_model.load_state_dict(state_dict, strict=False)
+                self.ref_model.eval()
+                self.ref_model.requires_grad_(False)
             
         self.log(f'LLM总参数量：{sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.3f} 百万')
         return model, tokenizer
@@ -164,7 +219,14 @@ class Trainer:
     def setup_training(self) -> None:
         """设置训练相关组件"""
         # 设置数据集
-        Dataset = PretrainDataset if self.config.mode == TrainingMode.PRETRAIN else SFTDataset
+        Dataset = {
+            TrainingMode.PRETRAIN: PretrainDataset,
+            TrainingMode.SFT: SFTDataset,
+            TrainingMode.DPO: DPODataset
+        }.get(self.config.mode)
+        
+        if Dataset is None:
+            raise ValueError(f"不支持的训练模式: {self.config.mode}")
         
         # 验证数据文件是否存在
         if not os.path.exists(self.config.data_path):
@@ -179,9 +241,12 @@ class Trainer:
             
             # 验证第一个样本
             sample = train_ds[0]
-            self.log(f"样本输入形状: {sample[0].shape}")
-            self.log(f"样本标签形状: {sample[1].shape}")
-            self.log(f"样本掩码形状: {sample[2].shape}")
+            if self.config.mode == TrainingMode.DPO:
+                self.log(f"DPO样本结构: {sample.keys()}")
+            else:
+                self.log(f"样本输入形状: {sample[0].shape}")
+                self.log(f"样本标签形状: {sample[1].shape}")
+                self.log(f"样本掩码形状: {sample[2].shape}")
             
         except Exception as e:
             raise RuntimeError(f"数据集加载失败: {str(e)}")
@@ -218,6 +283,157 @@ class Trainer:
             1 + math.cos(math.pi * current_step / total_steps)
         )
 
+    def get_checkpoint_path(self, checkpoint_type: str = 'step', step: Optional[int] = None, is_best: bool = False) -> str:
+        """获取检查点保存路径"""
+        moe_path = '_moe' if self.config.use_moe else ''
+        mode_prefix = {
+            TrainingMode.PRETRAIN: "pretrain",
+            TrainingMode.SFT: "sft",
+            TrainingMode.DPO: "rlhf"
+        }[self.config.mode]
+        
+        if checkpoint_type == 'step' and step is not None:
+            return f'{self.config.out_dir}/{mode_prefix}_{self.config.dim}{moe_path}_step_{step}.pth'
+        elif checkpoint_type == 'best':
+            return f'{self.config.out_dir}/{mode_prefix}_{self.config.dim}{moe_path}_best.pth'
+        elif checkpoint_type == 'last':
+            return f'{self.config.out_dir}/{mode_prefix}_{self.config.dim}{moe_path}_last.pth'
+        else:
+            raise ValueError(f"不支持的检查点类型: {checkpoint_type}")
+            
+    def save_checkpoint(self, loss: Optional[torch.Tensor] = None, is_last: bool = False) -> None:
+        """保存模型检查点"""
+        if not self.ddp or dist.get_rank() == 0:
+            self.model.eval()
+            
+            # 准备保存的状态字典
+            if isinstance(self.model, DistributedDataParallel):
+                state_dict = self.model.module.state_dict()
+            else:
+                state_dict = self.model.state_dict()
+            
+            # 如果是按步数保存
+            if not is_last and self.current_step % self.config.save_interval_steps == 0:
+                checkpoint_path = self.get_checkpoint_path('step', self.current_step)
+                torch.save(state_dict, checkpoint_path)
+                self.saved_checkpoints.append(checkpoint_path)
+                
+                # 如果超过最大保存数量,删除最旧的检查点
+                while len(self.saved_checkpoints) > self.config.keep_checkpoint_max:
+                    oldest_checkpoint = self.saved_checkpoints.pop(0)
+                    if os.path.exists(oldest_checkpoint):
+                        os.remove(oldest_checkpoint)
+                
+                self.log(f"保存步数检查点: {checkpoint_path}")
+            
+            # 如果有loss且是最佳loss,保存最佳模型
+            if loss is not None and loss.item() < self.best_loss:
+                self.best_loss = loss.item()
+                if self.config.save_best_only:
+                    best_path = self.get_checkpoint_path('best')
+                    torch.save(state_dict, best_path)
+                    self.log(f"保存最佳模型: {best_path}, loss: {self.best_loss:.6f}")
+            
+            # 如果是最后一个epoch且需要保存最后的模型
+            if is_last and self.config.save_last:
+                last_path = self.get_checkpoint_path('last')
+                torch.save(state_dict, last_path)
+                self.log(f"保存最终模型: {last_path}")
+            
+            self.model.train()
+            
+    def train_epoch(self, epoch: int) -> None:
+        """训练一个epoch"""
+        loss_fct = nn.CrossEntropyLoss(reduction='none')
+        start_time = time.time()
+        
+        for step, batch in enumerate(self.train_loader):
+            try:
+                self.current_step = epoch * self.iter_per_epoch + step
+                
+                # DPO模式的数据处理不同
+                if self.config.mode == TrainingMode.DPO:
+                    x_chosen = batch['x_chosen'].to(self.config.device)
+                    x_rejected = batch['x_rejected'].to(self.config.device)
+                    y_chosen = batch['y_chosen'].to(self.config.device)
+                    y_rejected = batch['y_rejected'].to(self.config.device)
+                    mask_chosen = batch['mask_chosen'].to(self.config.device)
+                    mask_rejected = batch['mask_rejected'].to(self.config.device)
+                    x = torch.cat([x_chosen, x_rejected], dim=0)
+                    y = torch.cat([y_chosen, y_rejected], dim=0)
+                    loss_mask = torch.cat([mask_chosen, mask_rejected], dim=0)
+                else:
+                    X, Y, loss_mask = batch
+                    # 确保输入数据维度正确
+                    if X.dim() != 2:
+                        X = X.view(X.size(0), -1)
+                    if Y.dim() != 2:
+                        Y = Y.view(Y.size(0), -1)
+                    
+                    # 将数据移动到设备
+                    x = X.to(self.config.device)
+                    y = Y.to(self.config.device)
+                    loss_mask = loss_mask.to(self.config.device)
+
+                # 更新学习率
+                lr = self.get_lr(self.current_step, self.config.epochs * self.iter_per_epoch)
+                for param_group in self.optimizer.param_groups:
+                    param_group['lr'] = lr
+
+                # 使用 autocast 进行混合精度训练
+                with self.ctx:
+                    # 同步 GPU
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                    
+                    if self.config.mode == TrainingMode.DPO:
+                        # DPO训练
+                        with torch.no_grad():
+                            ref_outputs = self.ref_model(x)
+                            ref_logits = ref_outputs.logits
+                        ref_probs = logits_to_probs(ref_logits, y)
+                        ref_probs = ref_probs * loss_mask
+                        
+                        outputs = self.model(x)
+                        logits = outputs.logits
+                        probs = logits_to_probs(logits, y)
+                        probs = probs * loss_mask
+                        loss = dpo_loss(ref_probs, probs, beta=self.config.dpo_beta)
+                        loss = loss + outputs.aux_loss
+                    else:
+                        # 预训练或SFT
+                        res = self.model(x)
+                        loss = loss_fct(
+                            res.logits.view(-1, res.logits.size(-1)),
+                            y.view(-1)
+                        ).view(y.size())
+                        loss = (loss * loss_mask).sum() / loss_mask.sum()
+                        loss += res.aux_loss
+                    
+                    loss = loss / self.config.accumulation_steps
+
+                self.scaler.scale(loss).backward()
+
+                if (step + 1) % self.config.accumulation_steps == 0:
+                    self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                    self.optimizer.zero_grad(set_to_none=True)
+
+                if step % self.config.log_interval == 0:
+                    self.log_progress(epoch, step, loss, start_time)
+
+                # 保存检查点
+                self.save_checkpoint(loss)
+                    
+            except RuntimeError as e:
+                if "CUDA" in str(e):
+                    self.log("CUDA 错误，尝试恢复训练...")
+                    torch.cuda.empty_cache()
+                    continue
+                raise e
+                
     def train(self) -> None:
         """训练循环"""
         # 清理缓存并重置
@@ -256,72 +472,9 @@ class Trainer:
                     torch.cuda.empty_cache()
                     continue
                 raise e
-
-    def train_epoch(self, epoch: int) -> None:
-        """训练一个epoch"""
-        loss_fct = nn.CrossEntropyLoss(reduction='none')
-        start_time = time.time()
         
-        for step, (X, Y, loss_mask) in enumerate(self.train_loader):
-            try:
-                # 确保输入数据维度正确
-                if X.dim() != 2:
-                    X = X.view(X.size(0), -1)
-                if Y.dim() != 2:
-                    Y = Y.view(Y.size(0), -1)
-                
-                # 将数据移动到设备
-                X = X.to(self.config.device)
-                Y = Y.to(self.config.device)
-                loss_mask = loss_mask.to(self.config.device)
-
-                # 更新学习率
-                lr = self.get_lr(epoch * self.iter_per_epoch + step, self.config.epochs * self.iter_per_epoch)
-                for param_group in self.optimizer.param_groups:
-                    param_group['lr'] = lr
-
-                # 使用 autocast 进行混合精度训练
-                with self.ctx:
-                    # 同步 GPU
-                    if torch.cuda.is_available():
-                        torch.cuda.synchronize()
-                    
-                    res = self.model(X)
-                    loss = loss_fct(
-                        res.logits.view(-1, res.logits.size(-1)),
-                        Y.view(-1)
-                    ).view(Y.size())
-                    loss = (loss * loss_mask).sum() / loss_mask.sum()
-                    loss += res.aux_loss
-                    loss = loss / self.config.accumulation_steps
-
-                self.scaler.scale(loss).backward()
-
-                if (step + 1) % self.config.accumulation_steps == 0:
-                    self.scaler.unscale_(self.optimizer)
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
-
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
-
-                    self.optimizer.zero_grad(set_to_none=True)
-                    
-                    # 同步 GPU
-                    if torch.cuda.is_available():
-                        torch.cuda.synchronize()
-
-                if step % self.config.log_interval == 0:
-                    self.log_progress(epoch, step, loss, start_time)
-
-                if (step + 1) % self.config.save_interval == 0:
-                    self.save_checkpoint()
-                    
-            except RuntimeError as e:
-                if "CUDA" in str(e):
-                    self.log(f"步骤 {step} CUDA 错误: {str(e)}")
-                    torch.cuda.empty_cache()
-                    continue
-                raise e
+        # 保存最后一个epoch的模型
+        self.save_checkpoint(is_last=True)
 
     def log_progress(self, epoch: int, step: int, loss: torch.Tensor, start_time: float) -> None:
         """记录训练进度"""
@@ -344,22 +497,6 @@ class Trainer:
                 "lr": self.optimizer.param_groups[-1]['lr'],
                 "epoch_Time": spend_time / (step + 1) * self.iter_per_epoch // 60 - spend_time // 60
             })
-
-    def save_checkpoint(self) -> None:
-        """保存模型检查点"""
-        if not self.ddp or dist.get_rank() == 0:
-            self.model.eval()
-            moe_path = '_moe' if self.config.use_moe else ''
-            mode_prefix = "pretrain" if self.config.mode == TrainingMode.PRETRAIN else "sft"
-            ckp = f'{self.config.out_dir}/{mode_prefix}_{self.config.dim}{moe_path}.pth'
-            
-            if isinstance(self.model, DistributedDataParallel):
-                state_dict = self.model.module.state_dict()
-            else:
-                state_dict = self.model.state_dict()
-                
-            torch.save(state_dict, ckp)
-            self.model.train()
 
     def log(self, content: str) -> None:
         """日志记录"""
@@ -394,8 +531,8 @@ class ModelTests(unittest.TestCase):
 
 def main():
     parser = argparse.ArgumentParser(description="Zer02LLM Training Framework")
-    parser.add_argument("--mode", type=str, choices=["pretrain", "sft", "test"], default="pretrain",
-                      help="Training mode: pretrain, sft, or test")
+    parser.add_argument("--mode", type=str, choices=["pretrain", "sft", "dpo", "test"], default="pretrain",
+                      help="Training mode: pretrain, sft, dpo, or test")
     parser.add_argument("--out_dir", type=str, default="out")
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--batch_size", type=int, default=32)
@@ -412,6 +549,16 @@ def main():
     parser.add_argument("--log_interval", type=int, default=100)
     parser.add_argument("--save_interval", type=int, default=100)
     parser.add_argument("--local_rank", type=int, default=-1)
+    
+    # 检查点保存相关参数
+    parser.add_argument("--save_best_only", action="store_true",
+                      help="是否只保存最佳模型")
+    parser.add_argument("--save_last", action="store_true",
+                      help="是否保存最后一个epoch的模型")
+    parser.add_argument("--save_interval_steps", type=int, default=1000,
+                      help="每多少步保存一次模型")
+    parser.add_argument("--keep_checkpoint_max", type=int, default=5,
+                      help="最多保存多少个检查点")
     
     # 模型参数
     parser.add_argument("--dim", type=int, default=512)
@@ -436,6 +583,12 @@ def main():
     parser.add_argument("--seq_aux", action="store_true")
     parser.add_argument("--norm_topk_prob", action="store_true")
     
+    # DPO参数
+    parser.add_argument("--dpo_beta", type=float, default=0.1,
+                      help="DPO loss的beta参数")
+    parser.add_argument("--ref_model_path", type=str, default=None,
+                      help="参考模型路径")
+    
     # 数据路径
     parser.add_argument("--data_path", type=str, default="./dataset/pretrain_hq.jsonl")
     
@@ -459,6 +612,10 @@ def main():
         log_interval=args.log_interval,
         save_interval=args.save_interval,
         local_rank=args.local_rank,
+        save_best_only=args.save_best_only,
+        save_last=args.save_last,
+        save_interval_steps=args.save_interval_steps,
+        keep_checkpoint_max=args.keep_checkpoint_max,
         dim=args.dim,
         n_layers=args.n_layers,
         max_seq_len=args.max_seq_len,
@@ -478,6 +635,8 @@ def main():
         aux_loss_alpha=args.aux_loss_alpha,
         seq_aux=args.seq_aux,
         norm_topk_prob=args.norm_topk_prob,
+        dpo_beta=args.dpo_beta,
+        ref_model_path=args.ref_model_path,
         data_path=args.data_path
     )
     

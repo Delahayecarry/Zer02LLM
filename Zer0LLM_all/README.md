@@ -14,6 +14,8 @@
 - 📊 支持 Wandb 实验追踪
 - 🔄 支持流式推理输出
 - 💾 支持梯度累积和混合精度训练
+- 📝 支持最佳模型保存和检查点管理
+- 🔁 支持定期保存和自动清理检查点
 
 ## 目录结构
 
@@ -59,14 +61,125 @@ pip install -r requirements.txt
 ### 3. 模型训练
 
 ```bash
-# CPU训练（测试用）
-python pretrain_sft_lora.py --device cpu --mode pretrain --batch_size 2 --epochs 1 --dim 128 --n_layers 2 --max_seq_len 128 --n_heads 4
+# 预训练模式 (Pretrain)
 
-# GPU训练（单卡）
-python pretrain_sft_lora.py --mode pretrain --batch_size 32 --epochs 1 --learning_rate 5e-4 --dim 512 --n_layers 8
+## CPU训练（测试用）
+python pretrain_sft_lora.py \
+    --mode pretrain \
+    --device cpu \
+    --batch_size 2 \
+    --epochs 1 \
+    --dim 128 \
+    --n_layers 2 \
+    --max_seq_len 128 \
+    --n_heads 4
 
-# 分布式训练（多卡）
-torchrun --nproc_per_node=2 pretrain_sft_lora.py --mode pretrain --ddp --batch_size 16
+## GPU训练（单卡）- 基础配置
+python pretrain_sft_lora.py \
+    --mode pretrain \
+    --batch_size 32 \
+    --epochs 1 \
+    --learning_rate 5e-4 \
+    --dim 512 \
+    --n_layers 8 \
+    --accumulation_steps 8 \
+    --save_interval 1000 \
+    --save_best_only \
+    --save_last \
+    --save_interval_steps 1000 \
+    --keep_checkpoint_max 5
+
+## GPU训练（多卡）
+torchrun --nproc_per_node=2 pretrain_sft_lora.py \
+    --mode pretrain \
+    --ddp \
+    --batch_size 16 \
+    --accumulation_steps 8 \
+    --save_interval 1000 \
+    --save_best_only \
+    --save_last
+
+# 监督微调模式 (SFT)
+
+## 单卡训练
+python pretrain_sft_lora.py \
+    --mode sft \
+    --batch_size 16 \
+    --epochs 1 \
+    --learning_rate 5e-6 \
+    --dim 512 \
+    --n_layers 8 \
+    --max_seq_len 512 \
+    --accumulation_steps 8 \
+    --save_interval 1000 \
+    --save_best_only \
+    --save_last
+
+## 多卡训练
+torchrun --nproc_per_node=2 pretrain_sft_lora.py \
+    --mode sft \
+    --ddp \
+    --batch_size 8 \
+    --epochs 1 \
+    --learning_rate 5e-6 \
+    --save_best_only \
+    --save_last
+
+## 启用MoE的SFT训练
+python pretrain_sft_lora.py \
+    --mode sft \
+    --use_moe \
+    --n_routed_experts 8 \
+    --num_experts_per_tok 2 \
+    --batch_size 8 \
+    --save_best_only \
+    --save_last
+
+# 人类偏好对齐模式 (DPO)
+
+## 单卡训练
+python pretrain_sft_lora.py \
+    --mode dpo \
+    --batch_size 8 \
+    --epochs 2 \
+    --learning_rate 1e-8 \
+    --max_seq_len 3000 \
+    --accumulation_steps 8 \
+    --save_interval 1000 \
+    --save_best_only \
+    --save_last
+
+## 多卡训练
+torchrun --nproc_per_node=2 pretrain_sft_lora.py \
+    --mode dpo \
+    --ddp \
+    --batch_size 8 \
+    --epochs 2 \
+    --learning_rate 1e-8 \
+    --max_seq_len 3000 \
+    --save_best_only \
+    --save_last
+
+## 启用MoE的DPO训练
+python pretrain_sft_lora.py \
+    --mode dpo \
+    --use_moe \
+    --batch_size 8 \
+    --epochs 2 \
+    --learning_rate 1e-8 \
+    --max_seq_len 3000 \
+    --save_best_only \
+    --save_last
+
+## 显存优化配置的DPO训练
+python pretrain_sft_lora.py \
+    --mode dpo \
+    --batch_size 4 \
+    --accumulation_steps 4 \
+    --learning_rate 1e-8 \
+    --max_seq_len 3000 \
+    --save_best_only \
+    --save_last
 ```
 
 ### 4. 模型评估
@@ -84,6 +197,7 @@ python eval_model.py --model_mode 1 --dim 512 --n_layers 8 --stream True
 ### 1. 训练模式
 - **预训练 (Pretrain)**: 从头训练模型
 - **监督微调 (SFT)**: 基于预训练模型进行对话能力训练
+- **人类偏好对齐 (DPO)**: 基于人类偏好数据进行模型对齐训练
 
 ### 2. 模型特性
 - **注意力机制**: 支持标准注意力和 Flash Attention
@@ -96,6 +210,14 @@ python eval_model.py --model_mode 1 --dim 512 --n_layers 8 --stream True
 - **分布式训练**: 支持多GPU训练
 - **性能监控**: 支持 Wandb 实验追踪
 - **流式生成**: 支持流式文本生成
+- **检查点管理**: 支持最佳模型保存和自动清理
+
+### 4. 检查点保存策略
+- **定期保存**: 按步数间隔保存模型
+- **最佳模型**: 保存训练过程中loss最低的模型
+- **最终模型**: 保存训练结束时的模型状态
+- **自动清理**: 自动删除旧的检查点以节省空间
+- **数量控制**: 可配置保留的最大检查点数量
 
 ## 显存优化配置
 
@@ -108,6 +230,15 @@ python pretrain_sft_lora.py --mode pretrain --dim 768 --n_layers 12 --batch_size
 
 # 40GB显存配置
 python pretrain_sft_lora.py --mode pretrain --dim 1024 --n_layers 16 --batch_size 32 --accumulation_steps 4
+
+# DPO训练 16GB显存配置
+python pretrain_sft_lora.py --mode dpo --dim 512 --n_layers 8 --batch_size 4 --accumulation_steps 8 --max_seq_len 2048
+
+# DPO训练 24GB显存配置
+python pretrain_sft_lora.py --mode dpo --dim 768 --n_layers 12 --batch_size 6 --accumulation_steps 6 --max_seq_len 2048
+
+# DPO训练 40GB显存配置
+python pretrain_sft_lora.py --mode dpo --dim 1024 --n_layers 16 --batch_size 8 --accumulation_steps 4 --max_seq_len 3000
 ```
 
 ## 常见问题解决
@@ -130,6 +261,12 @@ python pretrain_sft_lora.py --mode pretrain --dim 1024 --n_layers 16 --batch_siz
 - 启用梯度裁剪
 - 调整 batch_size 和 accumulation_steps
 
+### 4. 检查点管理
+- 合理设置保存间隔
+- 控制检查点数量
+- 及时清理旧检查点
+- 保存最佳模型
+
 ## 参数说明
 
 ### 模型参数
@@ -139,6 +276,7 @@ python pretrain_sft_lora.py --mode pretrain --dim 1024 --n_layers 16 --batch_siz
 | n_layers | 层数 | 8 |
 | n_heads | 注意力头数 | 8 |
 | max_seq_len | 最大序列长度 | 2048 |
+| use_moe | 是否启用 MoE | False |
 
 ### 训练参数
 | 参数 | 说明 | 默认值 |
@@ -148,7 +286,104 @@ python pretrain_sft_lora.py --mode pretrain --dim 1024 --n_layers 16 --batch_siz
 | accumulation_steps | 梯度累积步数 | 8 |
 | epochs | 训练轮数 | 1 |
 
+### DPO训练参数
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| learning_rate | DPO学习率 | 1e-8 |
+| batch_size | 批次大小 | 8 |
+| max_seq_len | 序列长度 | 3000 |
+| epochs | 训练轮数 | 2 |
+
+### 检查点参数
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| save_best_only | 是否只保存最佳模型 | True |
+| save_last | 是否保存最后一个epoch的模型 | True |
+| save_interval_steps | 每多少步保存一次模型 | 1000 |
+| keep_checkpoint_max | 最多保存多少个检查点 | 5 |
+
 ## 开源协议
 
 本项目采用 MIT 协议 - 详见 [LICENSE](LICENSE) 文件
+
+## 完整参数配置说明
+
+### 基础训练参数
+| 参数 | 说明 | 默认值 | 可选值 |
+|------|------|--------|--------|
+| mode | 训练模式 | pretrain | pretrain/sft/dpo/test |
+| out_dir | 输出目录 | out | 任意有效路径 |
+| epochs | 训练轮数 | 1 | 正整数 |
+| batch_size | 批次大小 | 32 | 正整数 |
+| learning_rate | 学习率 | 5e-4 | 浮点数 |
+| device | 训练设备 | cuda:0/cpu | cuda:N/cpu |
+| dtype | 数据类型 | bfloat16 | float16/bfloat16/float32 |
+
+### 日志和监控参数
+| 参数 | 说明 | 默认值 | 可选值 |
+|------|------|--------|--------|
+| use_wandb | 是否使用wandb | False | True/False |
+| wandb_project | wandb项目名 | Zer02LLM | 字符串 |
+| log_interval | 日志记录间隔 | 100 | 正整数 |
+| save_interval | 保存间隔 | 100 | 正整数 |
+
+### 检查点保存参数
+| 参数 | 说明 | 默认值 | 可选值 |
+|------|------|--------|--------|
+| save_best_only | 是否只保存最佳模型 | True | True/False |
+| save_last | 是否保存最后一个epoch的模型 | True | True/False |
+| save_interval_steps | 每多少步保存一次模型 | 1000 | 正整数 |
+| keep_checkpoint_max | 最多保存多少个检查点 | 5 | 正整数 |
+
+### 分布式训练参数
+| 参数 | 说明 | 默认值 | 可选值 |
+|------|------|--------|--------|
+| num_workers | 数据加载线程数 | 1 | 正整数 |
+| ddp | 是否使用DDP | False | True/False |
+| local_rank | 本地进程序号 | -1 | 整数 |
+
+### 优化器参数
+| 参数 | 说明 | 默认值 | 可选值 |
+|------|------|--------|--------|
+| accumulation_steps | 梯度累积步数 | 8 | 正整数 |
+| grad_clip | 梯度裁剪值 | 1.0 | 正浮点数 |
+| warmup_iters | 预热迭代次数 | 0 | 非负整数 |
+
+### 模型结构参数
+| 参数 | 说明 | 默认值 | 可选值 |
+|------|------|--------|--------|
+| dim | 隐藏层维度 | 512 | 正整数 |
+| n_layers | 层数 | 8 | 正整数 |
+| max_seq_len | 最大序列长度 | 512 | 正整数 |
+| vocab_size | 词表大小 | 4000 | 正整数 |
+| n_heads | 注意力头数 | 8 | 正整数 |
+| n_kv_heads | KV注意力头数 | None | 正整数/None |
+| rope_theta | RoPE角度参数 | 10000.0 | 正浮点数 |
+| dropout | Dropout比率 | 0.1 | 0~1浮点数 |
+| norm_eps | 归一化epsilon | 1e-8 | 正浮点数 |
+| multiple_of | 维度倍数 | 64 | 正整数 |
+| flash_attn | 是否使用Flash Attention | False | True/False |
+
+### MoE相关参数
+| 参数 | 说明 | 默认值 | 可选值 |
+|------|------|--------|--------|
+| use_moe | 是否启用MoE | False | True/False |
+| n_routed_experts | 路由专家数量 | 8 | 正整数 |
+| num_experts_per_tok | 每个token的专家数 | 2 | 正整数 |
+| n_shared_experts | 共享专家数量 | 0 | 非负整数 |
+| scoring_func | 评分函数 | softmax | softmax |
+| aux_loss_alpha | 辅助损失权重 | 0.1 | 正浮点数 |
+| seq_aux | 是否使用序列辅助损失 | True | True/False |
+| norm_topk_prob | 是否归一化topk概率 | True | True/False |
+
+### DPO相关参数
+| 参数 | 说明 | 默认值 | 可选值 |
+|------|------|--------|--------|
+| dpo_beta | DPO loss的beta参数 | 0.1 | 正浮点数 |
+| ref_model_path | 参考模型路径 | None | 字符串/None |
+
+### 数据相关参数
+| 参数 | 说明 | 默认值 | 可选值 |
+|------|------|--------|--------|
+| data_path | 训练数据路径 | ./dataset/pretrain_hq.jsonl | 有效文件路径 |
 
