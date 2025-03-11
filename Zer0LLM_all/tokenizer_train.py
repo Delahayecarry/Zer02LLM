@@ -6,7 +6,7 @@ from tokenizers import (
     normalizers,
     pre_tokenizers,
     trainers,
-    Tokenizer,
+    Tokenizer, 
 )
 from transformers import AutoTokenizer
 
