@@ -58,12 +58,12 @@ parameters:
   wandb_log_model:
     value: true
   
-  # 检查点保存参数
-  save_best_only:
-    value: true
+  # 检查点保存参数 - 移除这些参数，因为它们导致W&B API错误
+  # save_best_only:
+  #   value: true
   
-  save_last:
-    value: true
+  # save_last:
+  #   value: true
   
   save_interval_steps:
     value: 1000

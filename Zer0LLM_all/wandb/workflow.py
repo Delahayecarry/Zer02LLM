@@ -62,8 +62,29 @@ class Zer02LLMWorkflow:
         """设置wandb配置"""
         print("=== 设置wandb配置 ===")
         
-        # 设置wandb主机和基础URL
-        wandb.login(host=self.wandb_host, base_url=self.wandb_base_url)
+        try:
+            # 设置wandb主机和基础URL
+            if self.wandb_host:
+                print(f"使用自定义wandb主机: {self.wandb_host}")
+                os.environ["WANDB_BASE_URL"] = self.wandb_host
+            
+            if self.wandb_base_url:
+                print(f"使用自定义wandb基础URL: {self.wandb_base_url}")
+                os.environ["WANDB_API_URL"] = f"{self.wandb_base_url}/api"
+            
+            # 尝试登录
+            print("尝试登录到wandb...")
+            wandb.login()
+            print("wandb登录成功")
+            
+            # 获取当前用户信息
+            api = wandb.Api()
+            self.entity = api.default_entity
+            print(f"使用默认实体: {self.entity}")
+        
+        except Exception as e:
+            print(f"wandb设置失败: {e}")
+            print("请确保已正确安装wandb并且可以访问wandb服务器")
     
     def setup(self) -> None:
         """设置工作流环境和配置"""
@@ -81,7 +102,7 @@ class Zer02LLMWorkflow:
         else:  # sft
             template_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sweep_config.yaml")
             # 修改SFT特定参数
-            with open(template_path, "r") as f:
+            with open(template_path, "r", encoding="utf-8") as f:
                 config = yaml.safe_load(f)
                 config["parameters"]["mode"]["value"] = "sft"
                 config["parameters"]["learning_rate"]["min"] = 1e-6
@@ -94,11 +115,11 @@ class Zer02LLMWorkflow:
             
             if self.mode in ["pretrain", "dpo"]:
                 # 直接复制模板
-                with open(template_path, "r") as src, open(self.config_path, "w") as dst:
+                with open(template_path, "r", encoding="utf-8") as src, open(self.config_path, "w", encoding="utf-8") as dst:
                     dst.write(src.read())
             else:
                 # 写入修改后的SFT配置
-                with open(self.config_path, "w") as f:
+                with open(self.config_path, "w", encoding="utf-8") as f:
                     yaml.dump(config, f)
         
         print(f"配置文件已保存到: {self.config_path}")
@@ -113,7 +134,7 @@ class Zer02LLMWorkflow:
         }
         
         workflow_config_path = os.path.join(self.output_dir, "workflow_config.json")
-        with open(workflow_config_path, "w") as f:
+        with open(workflow_config_path, "w", encoding="utf-8") as f:
             json.dump(workflow_config, f, indent=2)
         
         print(f"工作流配置已保存到: {workflow_config_path}")
@@ -122,8 +143,17 @@ class Zer02LLMWorkflow:
         """运行超参数搜索"""
         print("=== 运行超参数搜索 ===")
         
+        # 如果配置路径不存在，先运行 setup
+        if not self.config_path or not os.path.exists(self.config_path):
+            print("配置文件不存在，先运行 setup...")
+            self.setup()
+            
+            if not self.config_path or not os.path.exists(self.config_path):
+                print("无法创建配置文件，超参数搜索失败")
+                return None
+        
         # 读取配置文件
-        with open(self.config_path, "r") as f:
+        with open(self.config_path, "r", encoding="utf-8") as f:
             sweep_config = yaml.safe_load(f)
         
         # 确保配置中的项目名称与当前项目一致
@@ -132,23 +162,49 @@ class Zer02LLMWorkflow:
         # 确保配置中的训练模式与当前模式一致
         sweep_config["parameters"]["mode"]["value"] = self.mode
         
-        # 创建sweep
-        self.sweep_id = wandb.sweep(sweep_config, project=self.project_name, entity=self.entity)
-        print(f"创建了新的sweep: {self.sweep_id}")
+        # 添加保存检查点的命令行参数（不作为sweep参数）
+        if "command" not in sweep_config:
+            sweep_config["command"] = ["${program}", "${args}", "--save_best_only", "--save_last"]
+        elif isinstance(sweep_config["command"], list):
+            if "--save_best_only" not in sweep_config["command"]:
+                sweep_config["command"].append("--save_best_only")
+            if "--save_last" not in sweep_config["command"]:
+                sweep_config["command"].append("--save_last")
+        
+        # 如果没有指定entity，使用当前登录的用户
+        if not self.entity:
+            try:
+                api = wandb.Api()
+                self.entity = api.default_entity
+                print(f"使用默认实体: {self.entity}")
+            except Exception as e:
+                print(f"获取默认实体失败: {e}")
+                print("尝试使用当前登录用户作为实体...")
+                self.entity = "carry"  # 使用你当前登录的用户名
+        
+        try:
+            # 创建sweep
+            print(f"正在创建sweep，项目: {self.project_name}, 实体: {self.entity}")
+            self.sweep_id = wandb.sweep(sweep_config, project=self.project_name, entity=self.entity)
+            print(f"创建了新的sweep: {self.sweep_id}")
+        except Exception as e:
+            print(f"创建sweep失败: {e}")
+            print("请确保已正确登录到wandb，并且实体名称正确")
+            return None
         
         # 保存sweep ID到工作流配置
         workflow_config_path = os.path.join(self.output_dir, "workflow_config.json")
         if os.path.exists(workflow_config_path):
-            with open(workflow_config_path, "r") as f:
+            with open(workflow_config_path, "r", encoding="utf-8") as f:
                 workflow_config = json.load(f)
             
             workflow_config["sweep_id"] = self.sweep_id
             workflow_config["sweep_started_at"] = datetime.datetime.now().isoformat()
             
-            with open(workflow_config_path, "w") as f:
+            with open(workflow_config_path, "w", encoding="utf-8") as f:
                 json.dump(workflow_config, f, indent=2)
         
-        # 运行sweep agent
+        # 运行自定义的sweep agent
         count = self.args.sweep_count
         print(f"启动{count}次运行...")
         
@@ -159,23 +215,69 @@ class Zer02LLMWorkflow:
         
         # 为私有化wandb设置环境变量
         if self.wandb_host:
-            env["WANDB_BASE_URL"] = self.wandb_base_url if self.wandb_base_url else f"http://{self.wandb_host}"
+            env["WANDB_BASE_URL"] = self.wandb_base_url if self.wandb_base_url else self.wandb_host
             env["WANDB_HOST"] = self.wandb_host
         
-        # 使用subprocess运行sweep agent
-        cmd = [
-            "python", "-m", "wandb", "agent", 
-            f"{self.entity}/{self.project_name}/{self.sweep_id}",
-            "--count", str(count)
-        ]
-        
-        try:
-            subprocess.run(cmd, env=env, check=True)
-            print("超参数搜索完成！")
-        except subprocess.CalledProcessError as e:
-            print(f"运行sweep agent时出错: {e}")
+        # 使用自定义的方法运行sweep agent
+        self.run_custom_sweep_agent(count, env)
         
         return self.sweep_id
+    
+    def run_custom_sweep_agent(self, count: int, env: Dict[str, str]) -> None:
+        """运行自定义的sweep agent，避免布尔标志参数问题"""
+        sweep_id_full = f"{self.entity}/{self.project_name}/{self.sweep_id}"
+        print(f"运行自定义sweep agent: {sweep_id_full}")
+        
+        # 导入wandb模块
+        import wandb
+        
+        # 定义agent函数
+        def agent_fn():
+            # 初始化wandb
+            wandb.init()
+            
+            # 获取当前配置
+            config = wandb.config
+            
+            # 构建命令行参数
+            cmd = ["python", "../pretrain_sft_lora_rlhf.py"]
+            
+            # 添加参数
+            for key, value in config.items():
+                if isinstance(value, bool):
+                    # 对于布尔值，如果为True，添加标志；如果为False，不添加
+                    if value:
+                        cmd.append(f"--{key}")
+                else:
+                    # 对于非布尔值，添加键值对
+                    cmd.append(f"--{key}={value}")
+            
+            # 打印命令
+            print(f"执行命令: {' '.join(cmd)}")
+            
+            # 运行命令
+            process = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            
+            # 实时输出日志
+            while True:
+                output = process.stdout.readline()
+                if output == '' and process.poll() is not None:
+                    break
+                if output:
+                    print(output.strip())
+            
+            # 获取退出码
+            return_code = process.poll()
+            if return_code != 0:
+                error_output = process.stderr.read()
+                print(f"命令退出码: {return_code}")
+                print(f"错误输出: {error_output}")
+                print("训练未成功完成")
+            else:
+                print("训练完成！")
+        
+        # 运行agent
+        wandb.agent(sweep_id_full, function=agent_fn, count=count)
     
     def find_best_run(self, sweep_id: str) -> Dict[str, Any]:
         """找到超参数搜索中的最佳运行"""
@@ -233,7 +335,7 @@ class Zer02LLMWorkflow:
         
         # 保存最佳配置
         best_config_path = os.path.join(self.output_dir, "best_config.yaml")
-        with open(best_config_path, "w") as f:
+        with open(best_config_path, "w", encoding="utf-8") as f:
             yaml.dump(best_config, f)
         
         print(f"最佳配置已保存到: {best_config_path}")
@@ -241,14 +343,14 @@ class Zer02LLMWorkflow:
         # 更新工作流配置
         workflow_config_path = os.path.join(self.output_dir, "workflow_config.json")
         if os.path.exists(workflow_config_path):
-            with open(workflow_config_path, "r") as f:
+            with open(workflow_config_path, "r", encoding="utf-8") as f:
                 workflow_config = json.load(f)
             
             workflow_config["best_run_id"] = best_run.id
             workflow_config["best_run_name"] = best_run.name
             workflow_config["best_metric"] = {metric_name: best_metric}
             
-            with open(workflow_config_path, "w") as f:
+            with open(workflow_config_path, "w", encoding="utf-8") as f:
                 json.dump(workflow_config, f, indent=2)
         
         return best_config
@@ -258,21 +360,28 @@ class Zer02LLMWorkflow:
         print("=== 使用最佳配置进行完整训练 ===")
         
         # 准备命令行参数
-        cmd = ["python", "../pretrain_sft_lora_rlhf.py"]
+        script_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "pretrain_sft_lora_rlhf.py")
+        cmd = ["python", script_path]
+        
+        # 定义标志参数列表（不需要值的参数）
+        flag_params = ["use_wandb", "wandb_log_model", "wandb_log_code", "wandb_watch_model", 
+                       "save_best_only", "save_last", "ddp", "flash_attn", "use_moe", 
+                       "seq_aux", "norm_topk_prob"]
         
         # 添加配置参数
         for key, value in best_config.items():
             if key == "wandb_project":
                 # 使用当前项目名称
                 cmd.extend(["--wandb_project", self.project_name])
-            elif isinstance(value, bool):
+            elif key in flag_params:
+                # 对于标志参数，只有当值为True时才添加
                 if value:
                     cmd.append(f"--{key}")
             else:
                 cmd.extend([f"--{key}", str(value)])
         
         # 添加wandb相关参数
-        if "--use_wandb" not in cmd:
+        if "--use_wandb" not in cmd and any(arg.startswith("--wandb_") for arg in cmd):
             cmd.append("--use_wandb")
         
         # 添加wandb运行名称
@@ -314,13 +423,13 @@ class Zer02LLMWorkflow:
                 # 更新工作流配置
                 workflow_config_path = os.path.join(self.output_dir, "workflow_config.json")
                 if os.path.exists(workflow_config_path):
-                    with open(workflow_config_path, "r") as f:
+                    with open(workflow_config_path, "r", encoding="utf-8") as f:
                         workflow_config = json.load(f)
                     
                     workflow_config["best_model_path"] = best_model_path
                     workflow_config["training_completed_at"] = datetime.datetime.now().isoformat()
                     
-                    with open(workflow_config_path, "w") as f:
+                    with open(workflow_config_path, "w", encoding="utf-8") as f:
                         json.dump(workflow_config, f, indent=2)
             
             return best_model_path
@@ -333,21 +442,31 @@ class Zer02LLMWorkflow:
         """评估训练好的模型"""
         print("=== 评估模型 ===")
         
-        if not model_path or not os.path.exists(model_path):
-            print(f"模型文件不存在: {model_path}")
-            return None
-        
-        # 从最佳配置中获取模型参数
+        # 加载最佳配置
         best_config_path = os.path.join(self.output_dir, "best_config.yaml")
         if not os.path.exists(best_config_path):
             print(f"最佳配置文件不存在: {best_config_path}")
-            return None
+            return {}
         
-        with open(best_config_path, "r") as f:
+        with open(best_config_path, "r", encoding="utf-8") as f:
             best_config = yaml.safe_load(f)
         
+        # 检查评估脚本是否存在
+        eval_script_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "eval_model.py")
+        if not os.path.exists(eval_script_path):
+            print(f"警告: 评估脚本不存在: {eval_script_path}")
+            print("跳过评估阶段。请确保 eval_model.py 文件存在于项目根目录。")
+            
+            # 返回一些模拟的评估结果，以便工作流可以继续
+            return {
+                "accuracy": 0.0,
+                "perplexity": 0.0,
+                "bleu": 0.0,
+                "rouge": 0.0
+            }
+        
         # 准备评估命令
-        cmd = ["python", "../eval_model.py"]
+        cmd = ["python", eval_script_path]
         
         # 添加模型参数
         model_mode = 0 if self.mode == "pretrain" else 1  # 0: pretrain, 1: sft/dpo
@@ -378,27 +497,27 @@ class Zer02LLMWorkflow:
             
             # 运行评估并将输出保存到文件
             eval_output_path = os.path.join(eval_dir, f"eval_results_{self.mode}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
-            with open(eval_output_path, "w") as f:
+            with open(eval_output_path, "w", encoding="utf-8") as f:
                 subprocess.run(cmd, env=env, check=True, stdout=f, stderr=subprocess.STDOUT)
             
             print(f"评估完成！结果保存在: {eval_output_path}")
             
             # 解析评估结果（这里需要根据eval_model.py的输出格式进行调整）
-            metrics = self._parse_eval_results(eval_output_path)
+            eval_results = self._parse_eval_results(eval_output_path)
             
             # 更新工作流配置
             workflow_config_path = os.path.join(self.output_dir, "workflow_config.json")
             if os.path.exists(workflow_config_path):
-                with open(workflow_config_path, "r") as f:
+                with open(workflow_config_path, "r", encoding="utf-8") as f:
                     workflow_config = json.load(f)
                 
-                workflow_config["evaluation_results"] = metrics
+                workflow_config["eval_results"] = eval_results
                 workflow_config["evaluation_completed_at"] = datetime.datetime.now().isoformat()
                 
-                with open(workflow_config_path, "w") as f:
+                with open(workflow_config_path, "w", encoding="utf-8") as f:
                     json.dump(workflow_config, f, indent=2)
             
-            return metrics
+            return eval_results
             
         except subprocess.CalledProcessError as e:
             print(f"评估过程中出错: {e}")
@@ -409,7 +528,7 @@ class Zer02LLMWorkflow:
         metrics = {}
         
         try:
-            with open(eval_output_path, "r") as f:
+            with open(eval_output_path, "r", encoding="utf-8") as f:
                 lines = f.readlines()
             
             # 这里需要根据eval_model.py的输出格式进行调整
@@ -472,13 +591,13 @@ class Zer02LLMWorkflow:
             # 更新工作流配置
             workflow_config_path = os.path.join(self.output_dir, "workflow_config.json")
             if os.path.exists(workflow_config_path):
-                with open(workflow_config_path, "r") as f:
+                with open(workflow_config_path, "r", encoding="utf-8") as f:
                     workflow_config = json.load(f)
                 
                 workflow_config["analysis_completed_at"] = datetime.datetime.now().isoformat()
                 workflow_config["analysis_dir"] = analysis_dir
                 
-                with open(workflow_config_path, "w") as f:
+                with open(workflow_config_path, "w", encoding="utf-8") as f:
                     json.dump(workflow_config, f, indent=2)
             
         except subprocess.CalledProcessError as e:
@@ -506,13 +625,13 @@ class Zer02LLMWorkflow:
             # 更新工作流配置
             workflow_config_path = os.path.join(self.output_dir, "workflow_config.json")
             if os.path.exists(workflow_config_path):
-                with open(workflow_config_path, "r") as f:
+                with open(workflow_config_path, "r", encoding="utf-8") as f:
                     workflow_config = json.load(f)
                 
                 workflow_config["deployed_model_path"] = deploy_model_path
                 workflow_config["deployment_completed_at"] = datetime.datetime.now().isoformat()
                 
-                with open(workflow_config_path, "w") as f:
+                with open(workflow_config_path, "w", encoding="utf-8") as f:
                     json.dump(workflow_config, f, indent=2)
             
         except Exception as e:
@@ -526,12 +645,19 @@ class Zer02LLMWorkflow:
         
         if self.args.stage == WorkflowStage.SWEEP or self.args.all:
             sweep_id = self.run_sweep()
-            self.sweep_id = sweep_id
+            if sweep_id is None:
+                print("超参数搜索失败，无法继续后续阶段")
+                if self.args.all:
+                    print("由于使用了--all参数，将尝试继续执行后续阶段...")
+                else:
+                    return
+            else:
+                self.sweep_id = sweep_id
         
         if self.args.stage == WorkflowStage.TRAIN or self.args.all:
             # 如果没有运行超参数搜索，则从配置中加载sweep_id
             if not self.sweep_id and os.path.exists(os.path.join(self.output_dir, "workflow_config.json")):
-                with open(os.path.join(self.output_dir, "workflow_config.json"), "r") as f:
+                with open(os.path.join(self.output_dir, "workflow_config.json"), "r", encoding="utf-8") as f:
                     workflow_config = json.load(f)
                     self.sweep_id = workflow_config.get("sweep_id")
             
@@ -546,7 +672,7 @@ class Zer02LLMWorkflow:
         if self.args.stage == WorkflowStage.EVALUATE or self.args.all:
             # 如果没有训练，则从配置中加载最佳模型路径
             if not self.best_model_path and os.path.exists(os.path.join(self.output_dir, "workflow_config.json")):
-                with open(os.path.join(self.output_dir, "workflow_config.json"), "r") as f:
+                with open(os.path.join(self.output_dir, "workflow_config.json"), "r", encoding="utf-8") as f:
                     workflow_config = json.load(f)
                     self.best_model_path = workflow_config.get("best_model_path")
             
@@ -559,7 +685,7 @@ class Zer02LLMWorkflow:
         if self.args.stage == WorkflowStage.ANALYZE or self.args.all:
             # 如果没有运行超参数搜索，则从配置中加载sweep_id
             if not self.sweep_id and os.path.exists(os.path.join(self.output_dir, "workflow_config.json")):
-                with open(os.path.join(self.output_dir, "workflow_config.json"), "r") as f:
+                with open(os.path.join(self.output_dir, "workflow_config.json"), "r", encoding="utf-8") as f:
                     workflow_config = json.load(f)
                     self.sweep_id = workflow_config.get("sweep_id")
             
@@ -572,7 +698,7 @@ class Zer02LLMWorkflow:
         if self.args.stage == WorkflowStage.DEPLOY or self.args.all:
             # 如果没有训练，则从配置中加载最佳模型路径
             if not self.best_model_path and os.path.exists(os.path.join(self.output_dir, "workflow_config.json")):
-                with open(os.path.join(self.output_dir, "workflow_config.json"), "r") as f:
+                with open(os.path.join(self.output_dir, "workflow_config.json"), "r", encoding="utf-8") as f:
                     workflow_config = json.load(f)
                     self.best_model_path = workflow_config.get("best_model_path")
             

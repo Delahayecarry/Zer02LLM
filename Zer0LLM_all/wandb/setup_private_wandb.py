@@ -56,11 +56,8 @@ def create_config_file(host, base_url=None, insecure=False, api_key=None):
     
     config = {}
     if os.path.exists(config_path):
-        try:
-            with open(config_path, "r") as f:
-                config = yaml.safe_load(f) or {}
-        except:
-            pass
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f) or {}
     
     # 更新配置
     config["base_url"] = base_url if base_url else f"http://{host}"
@@ -73,40 +70,30 @@ def create_config_file(host, base_url=None, insecure=False, api_key=None):
         config["api_key"] = api_key
     
     # 保存配置
-    with open(config_path, "w") as f:
+    with open(config_path, "w", encoding="utf-8") as f:
         yaml.dump(config, f)
     
     print(f"\nwandb配置已保存到: {config_path}")
 
 def create_env_file(host, base_url=None, insecure=False, api_key=None):
     """创建环境变量设置脚本"""
-    # 创建bash脚本
-    bash_script = "#!/bin/bash\n\n"
-    bash_script += f"export WANDB_HOST={host}\n"
-    bash_script += f"export WANDB_BASE_URL={base_url if base_url else 'http://' + host}\n"
+    # 生成shell脚本
+    with open("wandb_env.sh", "w", encoding="utf-8") as f:
+        f.write("#!/bin/bash\n\n")
+        f.write(f"export WANDB_API_KEY={api_key}\n")
+        f.write(f"export WANDB_BASE_URL={base_url}\n")
+        if host:
+            f.write(f"export WANDB_HOST={host}\n")
+        f.write("\necho 'W&B环境变量已设置!'\n")
     
-    if insecure:
-        bash_script += "export WANDB_INSECURE=true\n"
-    
-    if api_key:
-        bash_script += f"export WANDB_API_KEY={api_key}\n"
-    
-    with open("wandb_env.sh", "w") as f:
-        f.write(bash_script)
-    
-    # 创建PowerShell脚本
-    ps_script = ""
-    ps_script += f"$env:WANDB_HOST = '{host}'\n"
-    ps_script += f"$env:WANDB_BASE_URL = '{base_url if base_url else 'http://' + host}'\n"
-    
-    if insecure:
-        ps_script += "$env:WANDB_INSECURE = 'true'\n"
-    
-    if api_key:
-        ps_script += f"$env:WANDB_API_KEY = '{api_key}'\n"
-    
-    with open("wandb_env.ps1", "w") as f:
-        f.write(ps_script)
+    # 生成PowerShell脚本
+    with open("wandb_env.ps1", "w", encoding="utf-8") as f:
+        f.write("# PowerShell环境变量设置\n\n")
+        f.write(f"$env:WANDB_API_KEY = '{api_key}'\n")
+        f.write(f"$env:WANDB_BASE_URL = '{base_url}'\n")
+        if host:
+            f.write(f"$env:WANDB_HOST = '{host}'\n")
+        f.write("\nWrite-Host 'W&B环境变量已设置!' -ForegroundColor Green\n")
     
     print("\n环境变量设置脚本已创建:")
     print("  - wandb_env.sh (Linux/macOS)")

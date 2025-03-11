@@ -267,6 +267,121 @@ python run_sweep.py --config sweep_config_dpo.yaml --count 5 --mode dpo
 python run_sweep.py --config sweep_config.yaml --count 3 --gpu 0,1
 ```
 
+### 7. 自动化工作流
+
+Zer02LLM 提供了一个完整的自动化工作流脚本 `workflow.py`，可以帮助你自动化执行从设置、超参数搜索、训练、评估到部署的全流程。
+
+#### 工作流阶段
+
+工作流包含以下阶段：
+- **设置 (setup)**: 初始化工作流环境和配置
+- **超参数搜索 (sweep)**: 使用 Weights & Biases 进行超参数搜索
+- **训练 (train)**: 使用最佳超参数配置训练模型
+- **评估 (evaluate)**: 评估训练好的模型性能
+- **分析 (analyze)**: 分析训练和评估结果
+- **部署 (deploy)**: 部署最终模型
+
+#### 一键测试命令
+
+```bash
+# 设置阶段 - 初始化工作流环境和配置
+python workflow.py --mode pretrain --project your_project_name --output_dir ./test_output --stage setup
+
+# 超参数搜索阶段 - 运行 5 次实验
+python workflow.py --mode pretrain --project your_project_name --output_dir ./test_output --stage sweep --sweep_count 5
+
+# 训练阶段 - 使用最佳超参数配置训练模型
+python workflow.py --mode pretrain --project your_project_name --output_dir ./test_output --stage train
+
+# 评估阶段 - 评估训练好的模型
+python workflow.py --mode pretrain --project your_project_name --output_dir ./test_output --stage evaluate
+
+# 分析阶段 - 分析训练和评估结果
+python workflow.py --mode pretrain --project your_project_name --output_dir ./test_output --stage analyze
+
+# 部署阶段 - 部署最终模型
+python workflow.py --mode pretrain --project your_project_name --output_dir ./test_output --stage deploy
+
+# 运行完整工作流（从设置到部署）
+python workflow.py --mode pretrain --project your_project_name --output_dir ./test_output --all
+```
+
+#### 工作流参数说明
+
+| 参数 | 说明 | 默认值 | 可选值 |
+|------|------|--------|--------|
+| mode | 训练模式 | pretrain | pretrain/sft/dpo |
+| project | Wandb项目名称 | Zer02LLM_Workflow | 字符串 |
+| entity | Wandb实体名称 | None | 字符串/None |
+| config | 超参数搜索配置文件路径 | None | 有效文件路径 |
+| output_dir | 工作流输出目录 | workflow_output | 有效目录路径 |
+| sweep_count | 超参数搜索运行次数 | 5 | 正整数 |
+| gpu | 指定使用的GPU | None | 如 '0,1' |
+| stage | 要运行的工作流阶段 | setup | setup/sweep/train/evaluate/analyze/deploy |
+| all | 运行所有工作流阶段 | False | True/False |
+| wandb_host | wandb主机地址 | None | 字符串 |
+| wandb_base_url | wandb基础URL | None | 字符串 |
+
+#### 工作流输出
+
+工作流会在指定的输出目录中生成以下文件和目录：
+- `configs/`: 超参数配置文件
+- `workflow_config.json`: 工作流配置和状态
+- `best_config.yaml`: 最佳超参数配置
+- `analysis/`: 分析结果和图表
+- `eval_results_*.txt`: 评估结果
+
+#### Windows 系统注意事项
+
+在 Windows 系统上运行工作流脚本时，可能会遇到编码问题。如果遇到类似 `UnicodeDecodeError: 'gbk' codec can't decode byte...` 的错误，请确保所有文件读写操作都使用 UTF-8 编码：
+
+```python
+# 正确的文件读写方式
+with open(file_path, "r", encoding="utf-8") as f:
+    content = f.read()
+
+with open(file_path, "w", encoding="utf-8") as f:
+    f.write(content)
+```
+
+#### 完整测试流程示例
+
+以下是在本地进行完整测试的推荐步骤：
+
+1. **准备环境**：确保已安装所有依赖并登录到 Weights & Biases
+   ```bash
+   pip install -r requirements.txt
+   wandb login
+   ```
+
+2. **设置阶段**：初始化工作流配置
+   ```bash
+   python workflow.py --mode pretrain --project test_project --output_dir ./test_output --stage setup
+   ```
+
+3. **超参数搜索**：运行少量实验以测试功能
+   ```bash
+   python workflow.py --mode pretrain --project test_project --output_dir ./test_output --stage sweep --sweep_count 1
+   ```
+
+4. **训练阶段**：使用最佳配置训练模型
+   ```bash
+   python workflow.py --mode pretrain --project test_project --output_dir ./test_output --stage train
+   ```
+
+5. **评估和分析**：评估模型并分析结果
+   ```bash
+   python workflow.py --mode pretrain --project test_project --output_dir ./test_output --stage evaluate
+   python workflow.py --mode pretrain --project test_project --output_dir ./test_output --stage analyze
+   ```
+
+6. **部署阶段**：部署最终模型
+   ```bash
+   python workflow.py --mode pretrain --project test_project --output_dir ./test_output --stage deploy
+   ```
+
+在测试过程中，即使某些阶段因缺少数据或模型而无法完成，工作流脚本也会优雅地处理这些情况，并允许您继续测试后续阶段。
+
 ## 参数说明
 
 ### 模型参数
@@ -466,4 +581,94 @@ python run_sweep.py --config sweep_config_dpo.yaml --count 5 --mode dpo
 # 在特定GPU上运行超参数搜索
 python run_sweep.py --config sweep_config.yaml --count 3 --gpu 0,1
 ```
+
+### 7. 自动化工作流
+
+Zer02LLM 提供了一个完整的自动化工作流脚本 `workflow.py`，可以帮助你自动化执行从设置、超参数搜索、训练、评估到部署的全流程。
+
+#### 工作流阶段
+
+工作流包含以下阶段：
+- **设置 (setup)**: 初始化工作流环境和配置
+- **超参数搜索 (sweep)**: 使用 Weights & Biases 进行超参数搜索
+- **训练 (train)**: 使用最佳超参数配置训练模型
+- **评估 (evaluate)**: 评估训练好的模型性能
+- **分析 (analyze)**: 分析训练和评估结果
+- **部署 (deploy)**: 部署最终模型
+
+#### 一键测试命令
+
+```bash
+# 设置阶段 - 初始化工作流环境和配置
+python workflow.py --mode pretrain --project your_project_name --output_dir ./test_output --stage setup
+
+# 超参数搜索阶段 - 运行 5 次实验
+python workflow.py --mode pretrain --project your_project_name --output_dir ./test_output --stage sweep --sweep_count 5
+
+# 训练阶段 - 使用最佳超参数配置训练模型
+python workflow.py --mode pretrain --project your_project_name --output_dir ./test_output --stage train
+
+# 评估阶段 - 评估训练好的模型
+python workflow.py --mode pretrain --project your_project_name --output_dir ./test_output --stage evaluate
+
+# 分析阶段 - 分析训练和评估结果
+python workflow.py --mode pretrain --project your_project_name --output_dir ./test_output --stage analyze
+
+# 部署阶段 - 部署最终模型
+python workflow.py --mode pretrain --project your_project_name --output_dir ./test_output --stage deploy
+
+# 运行完整工作流（从设置到部署）
+python workflow.py --mode pretrain --project your_project_name --output_dir ./test_output --all
+```
+
+#### Windows 系统注意事项
+
+在 Windows 系统上运行工作流脚本时，可能会遇到编码问题。如果遇到类似 `UnicodeDecodeError: 'gbk' codec can't decode byte...` 的错误，请确保所有文件读写操作都使用 UTF-8 编码：
+
+```python
+# 正确的文件读写方式
+with open(file_path, "r", encoding="utf-8") as f:
+    content = f.read()
+
+with open(file_path, "w", encoding="utf-8") as f:
+    f.write(content)
+```
+
+#### 完整测试流程示例
+
+以下是在本地进行完整测试的推荐步骤：
+
+1. **准备环境**：确保已安装所有依赖并登录到 Weights & Biases
+   ```bash
+   pip install -r requirements.txt
+   wandb login
+   ```
+
+2. **设置阶段**：初始化工作流配置
+   ```bash
+   python workflow.py --mode pretrain --project test_project --output_dir ./test_output --stage setup
+   ```
+
+3. **超参数搜索**：运行少量实验以测试功能
+   ```bash
+   python workflow.py --mode pretrain --project test_project --output_dir ./test_output --stage sweep --sweep_count 1
+   ```
+
+4. **训练阶段**：使用最佳配置训练模型
+   ```bash
+   python workflow.py --mode pretrain --project test_project --output_dir ./test_output --stage train
+   ```
+
+5. **评估和分析**：评估模型并分析结果
+   ```bash
+   python workflow.py --mode pretrain --project test_project --output_dir ./test_output --stage evaluate
+   python workflow.py --mode pretrain --project test_project --output_dir ./test_output --stage analyze
+   ```
+
+6. **部署阶段**：部署最终模型
+   ```bash
+   python workflow.py --mode pretrain --project test_project --output_dir ./test_output --stage deploy
+   ```
+
+在测试过程中，即使某些阶段因缺少数据或模型而无法完成，工作流脚本也会优雅地处理这些情况，并允许您继续测试后续阶段。
 
