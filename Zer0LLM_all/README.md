@@ -287,11 +287,23 @@ Zer02LLM 提供了一个完整的自动化工作流脚本 `workflow.py`，可以
 # 设置阶段 - 初始化工作流环境和配置
 python workflow.py --mode pretrain --project your_project_name --output_dir ./test_output --stage setup
 
+# 设置阶段 - 使用自定义数据路径
+python workflow.py --mode pretrain --project your_project_name --output_dir ./test_output --stage setup --data_path ./dataset/pretrain_hq.jsonl
+
+# 设置阶段 - SFT模式（使用自定义数据路径和预训练模型）
+python workflow.py --mode sft --project your_project_name --output_dir ./test_output --stage setup --data_path ./dataset/sft_data.jsonl --pretrained_model_path ./out/best.pt
+
 # 超参数搜索阶段 - 运行 5 次实验
 python workflow.py --mode pretrain --project your_project_name --output_dir ./test_output --stage sweep --sweep_count 5
 
 # 训练阶段 - 使用最佳超参数配置训练模型
 python workflow.py --mode pretrain --project your_project_name --output_dir ./test_output --stage train
+
+# 训练阶段 - 使用自定义数据路径
+python workflow.py --mode pretrain --project your_project_name --output_dir ./test_output --stage train --data_path ./dataset/pretrain_hq.jsonl
+
+# 训练阶段 - SFT模式（使用自定义数据路径和预训练模型）
+python workflow.py --mode sft --project your_project_name --output_dir ./test_output --stage train --data_path ./dataset/sft_data.jsonl --pretrained_model_path ./out/best.pt
 
 # 评估阶段 - 评估训练好的模型
 python workflow.py --mode pretrain --project your_project_name --output_dir ./test_output --stage evaluate
@@ -304,6 +316,12 @@ python workflow.py --mode pretrain --project your_project_name --output_dir ./te
 
 # 运行完整工作流（从设置到部署）
 python workflow.py --mode pretrain --project your_project_name --output_dir ./test_output --all
+
+# 运行完整工作流 - 使用自定义数据路径
+python workflow.py --mode pretrain --project your_project_name --output_dir ./test_output --all --data_path ./dataset/pretrain_hq.jsonl
+
+# 运行完整工作流 - SFT模式（使用自定义数据路径和预训练模型）
+python workflow.py --mode sft --project your_project_name --output_dir ./test_output --all --data_path ./dataset/sft_data.jsonl --pretrained_model_path ./out/best.pt
 ```
 
 #### 工作流参数说明
@@ -321,6 +339,8 @@ python workflow.py --mode pretrain --project your_project_name --output_dir ./te
 | all | 运行所有工作流阶段 | False | True/False |
 | wandb_host | wandb主机地址 | None | 字符串 |
 | wandb_base_url | wandb基础URL | None | 字符串 |
+| data_path | 训练数据路径 | None | 有效文件路径 |
+| pretrained_model_path | 预训练模型路径 | None | 有效文件路径 |
 
 #### 工作流输出
 
@@ -343,6 +363,18 @@ with open(file_path, "r", encoding="utf-8") as f:
 with open(file_path, "w", encoding="utf-8") as f:
     f.write(content)
 ```
+
+在 Windows 系统上使用自定义数据路径和预训练模型路径时，请确保使用正斜杠（/）或双反斜杠（\\\\）作为路径分隔符，例如：
+
+```bash
+# 使用正斜杠（推荐）
+python workflow.py --mode pretrain --data_path ./dataset/pretrain_hq.jsonl
+
+# 或使用双反斜杠
+python workflow.py --mode pretrain --data_path .\\dataset\\pretrain_hq.jsonl
+```
+
+不要使用单反斜杠，因为它在命令行中是转义字符，可能导致路径解析错误。
 
 #### 完整测试流程示例
 
@@ -507,7 +539,7 @@ with open(file_path, "w", encoding="utf-8") as f:
 ### 数据相关参数
 | 参数 | 说明 | 默认值 | 可选值 |
 |------|------|--------|--------|
-| data_path | 训练数据路径 | ./dataset/pretrain_hq.jsonl | 有效文件路径 |
+| data_path | 训练数据路径 | None | 有效文件路径 |
 
 ## 显存优化配置
 
@@ -602,11 +634,23 @@ Zer02LLM 提供了一个完整的自动化工作流脚本 `workflow.py`，可以
 # 设置阶段 - 初始化工作流环境和配置
 python workflow.py --mode pretrain --project your_project_name --output_dir ./test_output --stage setup
 
+# 设置阶段 - 使用自定义数据路径
+python workflow.py --mode pretrain --project your_project_name --output_dir ./test_output --stage setup --data_path ./dataset/pretrain_hq.jsonl
+
+# 设置阶段 - SFT模式（使用自定义数据路径和预训练模型）
+python workflow.py --mode sft --project your_project_name --output_dir ./test_output --stage setup --data_path ./dataset/sft_data.jsonl --pretrained_model_path ./out/best.pt
+
 # 超参数搜索阶段 - 运行 5 次实验
 python workflow.py --mode pretrain --project your_project_name --output_dir ./test_output --stage sweep --sweep_count 5
 
 # 训练阶段 - 使用最佳超参数配置训练模型
 python workflow.py --mode pretrain --project your_project_name --output_dir ./test_output --stage train
+
+# 训练阶段 - 使用自定义数据路径
+python workflow.py --mode pretrain --project your_project_name --output_dir ./test_output --stage train --data_path ./dataset/pretrain_hq.jsonl
+
+# 训练阶段 - SFT模式（使用自定义数据路径和预训练模型）
+python workflow.py --mode sft --project your_project_name --output_dir ./test_output --stage train --data_path ./dataset/sft_data.jsonl --pretrained_model_path ./out/best.pt
 
 # 评估阶段 - 评估训练好的模型
 python workflow.py --mode pretrain --project your_project_name --output_dir ./test_output --stage evaluate
@@ -619,6 +663,12 @@ python workflow.py --mode pretrain --project your_project_name --output_dir ./te
 
 # 运行完整工作流（从设置到部署）
 python workflow.py --mode pretrain --project your_project_name --output_dir ./test_output --all
+
+# 运行完整工作流 - 使用自定义数据路径
+python workflow.py --mode pretrain --project your_project_name --output_dir ./test_output --all --data_path ./dataset/pretrain_hq.jsonl
+
+# 运行完整工作流 - SFT模式（使用自定义数据路径和预训练模型）
+python workflow.py --mode sft --project your_project_name --output_dir ./test_output --all --data_path ./dataset/sft_data.jsonl --pretrained_model_path ./out/best.pt
 ```
 
 #### Windows 系统注意事项

@@ -47,6 +47,10 @@ class Zer02LLMWorkflow:
         self.best_run_id = None
         self.best_model_path = None
         
+        # 数据和模型路径
+        self.data_path = args.data_path
+        self.pretrained_model_path = args.pretrained_model_path
+        
         # 私有化wandb服务器配置
         self.wandb_host = args.wandb_host
         self.wandb_base_url = args.wandb_base_url
@@ -132,6 +136,13 @@ class Zer02LLMWorkflow:
             "sweep_config": self.config_path,
             "created_at": datetime.datetime.now().isoformat(),
         }
+        
+        # 添加数据和模型路径（如果提供）
+        if self.data_path:
+            workflow_config["data_path"] = self.data_path
+        
+        if self.pretrained_model_path:
+            workflow_config["pretrained_model_path"] = self.pretrained_model_path
         
         workflow_config_path = os.path.join(self.output_dir, "workflow_config.json")
         with open(workflow_config_path, "w", encoding="utf-8") as f:
@@ -379,6 +390,16 @@ class Zer02LLMWorkflow:
                     cmd.append(f"--{key}")
             else:
                 cmd.extend([f"--{key}", str(value)])
+        
+        # 添加数据路径参数（如果提供）
+        if self.data_path:
+            cmd.extend(["--data_path", self.data_path])
+            print(f"使用自定义数据路径: {self.data_path}")
+        
+        # 添加预训练模型路径参数（如果提供且模式为sft或dpo）
+        if self.pretrained_model_path and self.mode in ["sft", "dpo"]:
+            cmd.extend(["--pretrained_model", self.pretrained_model_path])
+            print(f"使用预训练模型: {self.pretrained_model_path}")
         
         # 添加wandb相关参数
         if "--use_wandb" not in cmd and any(arg.startswith("--wandb_") for arg in cmd):
@@ -660,6 +681,15 @@ class Zer02LLMWorkflow:
                 with open(os.path.join(self.output_dir, "workflow_config.json"), "r", encoding="utf-8") as f:
                     workflow_config = json.load(f)
                     self.sweep_id = workflow_config.get("sweep_id")
+                    
+                    # 如果没有提供数据路径和预训练模型路径，则从配置中加载
+                    if not self.data_path and "data_path" in workflow_config:
+                        self.data_path = workflow_config["data_path"]
+                        print(f"从配置中加载数据路径: {self.data_path}")
+                    
+                    if not self.pretrained_model_path and "pretrained_model_path" in workflow_config:
+                        self.pretrained_model_path = workflow_config["pretrained_model_path"]
+                        print(f"从配置中加载预训练模型路径: {self.pretrained_model_path}")
             
             if not self.sweep_id:
                 print("未找到sweep ID，无法继续训练阶段")
@@ -737,6 +767,10 @@ def main():
                         help="wandb主机地址")
     parser.add_argument("--wandb_base_url", type=str, default=None,
                         help="wandb基础URL")
+    parser.add_argument("--data_path", type=str, default=None,
+                        help="训练数据路径，用于pretrain和sft模式")
+    parser.add_argument("--pretrained_model_path", type=str, default=None,
+                        help="预训练模型路径，用于sft和dpo模式")
     
     args = parser.parse_args()
     
