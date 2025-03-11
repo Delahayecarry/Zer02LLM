@@ -15,6 +15,7 @@ from transformers import AutoTokenizer
 from typing import Optional, Tuple, Dict, Any, List
 from dataclasses import dataclass
 from enum import Enum
+import datetime
 
 from model.model import LLM
 from model.LLMconfig import LLMconfig
@@ -72,6 +73,13 @@ class TrainingConfig:
     # 日志和监控
     use_wandb: bool = False
     wandb_project: str = "Zer02LLM"
+    wandb_run_name: Optional[str] = None  # wandb运行名称
+    wandb_log_model: bool = False  # 是否记录模型权重
+    wandb_log_code: bool = False  # 是否记录代码
+    wandb_log_freq: int = 1  # wandb记录频率(每多少步记录一次)
+    wandb_watch_model: bool = False  # 是否使用wandb.watch监控模型
+    wandb_watch_log: str = "gradients"  # wandb.watch的log参数
+    wandb_watch_log_freq: int = 100  # wandb.watch的log_freq参数
     log_interval: int = 100
     save_interval: int = 100
     
@@ -148,7 +156,34 @@ class Trainer:
         if self.config.use_wandb and (not self.ddp or dist.get_rank() == 0):
             import wandb
             self.wandb = wandb
-            wandb.init(project=self.config.wandb_project)
+            
+            # 准备配置字典，用于wandb记录
+            config_dict = {k: v for k, v in self.config.__dict__.items()}
+            
+            # 初始化wandb
+            run_name = self.config.wandb_run_name
+            if run_name is None:
+                run_name = f"{self.config.mode.value}-{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                
+            wandb.init(
+                project=self.config.wandb_project,
+                name=run_name,
+                config=config_dict
+            )
+            
+            # 记录代码
+            if self.config.wandb_log_code:
+                wandb.run.log_code(".", include_fn=lambda path: path.endswith(".py"))
+                
+            # 监控模型
+            if self.config.wandb_watch_model:
+                wandb.watch(
+                    self.model,
+                    log=self.config.wandb_watch_log,
+                    log_freq=self.config.wandb_watch_log_freq
+                )
+                
+            self.log(f"Wandb initialized: {wandb.run.name}")
         else:
             self.wandb = None
 
@@ -325,6 +360,16 @@ class Trainer:
                         os.remove(oldest_checkpoint)
                 
                 self.log(f"保存步数检查点: {checkpoint_path}")
+                
+                # 记录模型权重到wandb
+                if self.wandb is not None and self.config.wandb_log_model:
+                    artifact = self.wandb.Artifact(
+                        name=f"model-step-{self.current_step}", 
+                        type="model",
+                        description=f"Model checkpoint at step {self.current_step}"
+                    )
+                    artifact.add_file(checkpoint_path)
+                    self.wandb.log_artifact(artifact)
             
             # 如果有loss且是最佳loss,保存最佳模型
             if loss is not None and loss.item() < self.best_loss:
@@ -333,12 +378,32 @@ class Trainer:
                     best_path = self.get_checkpoint_path('best')
                     torch.save(state_dict, best_path)
                     self.log(f"保存最佳模型: {best_path}, loss: {self.best_loss:.6f}")
+                    
+                    # 记录最佳模型到wandb
+                    if self.wandb is not None and self.config.wandb_log_model:
+                        artifact = self.wandb.Artifact(
+                            name="model-best", 
+                            type="model",
+                            description=f"Best model with loss {self.best_loss:.6f}"
+                        )
+                        artifact.add_file(best_path)
+                        self.wandb.log_artifact(artifact)
             
             # 如果是最后一个epoch且需要保存最后的模型
             if is_last and self.config.save_last:
                 last_path = self.get_checkpoint_path('last')
                 torch.save(state_dict, last_path)
                 self.log(f"保存最终模型: {last_path}")
+                
+                # 记录最终模型到wandb
+                if self.wandb is not None and self.config.wandb_log_model:
+                    artifact = self.wandb.Artifact(
+                        name="model-last", 
+                        type="model",
+                        description="Final model checkpoint"
+                    )
+                    artifact.add_file(last_path)
+                    self.wandb.log_artifact(artifact)
             
             self.model.train()
             
@@ -346,10 +411,12 @@ class Trainer:
         """训练一个epoch"""
         loss_fct = nn.CrossEntropyLoss(reduction='none')
         start_time = time.time()
+        total_tokens = 0
         
         for step, batch in enumerate(self.train_loader):
             try:
                 self.current_step = epoch * self.iter_per_epoch + step
+                batch_start_time = time.time()
                 
                 # DPO模式的数据处理不同
                 if self.config.mode == TrainingMode.DPO:
@@ -362,6 +429,7 @@ class Trainer:
                     x = torch.cat([x_chosen, x_rejected], dim=0)
                     y = torch.cat([y_chosen, y_rejected], dim=0)
                     loss_mask = torch.cat([mask_chosen, mask_rejected], dim=0)
+                    batch_tokens = torch.sum(mask_chosen) + torch.sum(mask_rejected)
                 else:
                     X, Y, loss_mask = batch
                     # 确保输入数据维度正确
@@ -374,7 +442,10 @@ class Trainer:
                     x = X.to(self.config.device)
                     y = Y.to(self.config.device)
                     loss_mask = loss_mask.to(self.config.device)
+                    batch_tokens = torch.sum(loss_mask)
 
+                total_tokens += batch_tokens.item()
+                
                 # 更新学习率
                 lr = self.get_lr(self.current_step, self.config.epochs * self.iter_per_epoch)
                 for param_group in self.optimizer.param_groups:
@@ -414,15 +485,21 @@ class Trainer:
 
                 self.scaler.scale(loss).backward()
 
+                # 计算梯度范数
+                grad_norm = 0.0
                 if (step + 1) % self.config.accumulation_steps == 0:
                     self.scaler.unscale_(self.optimizer)
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
                     self.optimizer.zero_grad(set_to_none=True)
 
+                # 计算训练速度指标
+                batch_time = time.time() - batch_start_time
+                tokens_per_second = batch_tokens.item() / batch_time if batch_time > 0 else 0
+
                 if step % self.config.log_interval == 0:
-                    self.log_progress(epoch, step, loss, start_time)
+                    self.log_progress(epoch, step, loss, start_time, grad_norm, tokens_per_second, batch_tokens.item())
 
                 # 保存检查点
                 self.save_checkpoint(loss)
@@ -476,27 +553,64 @@ class Trainer:
         # 保存最后一个epoch的模型
         self.save_checkpoint(is_last=True)
 
-    def log_progress(self, epoch: int, step: int, loss: torch.Tensor, start_time: float) -> None:
+    def log_progress(self, epoch: int, step: int, loss: torch.Tensor, start_time: float, grad_norm: float, tokens_per_second: float, batch_tokens: int) -> None:
         """记录训练进度"""
         spend_time = time.time() - start_time
+        epoch_time_min = spend_time / (step + 1) * self.iter_per_epoch // 60 - spend_time // 60
+        
         self.log(
-            'Epoch:[{}/{}]({}/{}) loss:{:.3f} lr:{:.12f} epoch_Time:{}min:'.format(
+            'Epoch:[{}/{}]({}/{}) loss:{:.3f} lr:{:.12f} epoch_Time:{}min: tokens/s:{:.1f}'.format(
                 epoch + 1,
                 self.config.epochs,
                 step,
                 self.iter_per_epoch,
                 loss.item() * self.config.accumulation_steps,
                 self.optimizer.param_groups[-1]['lr'],
-                spend_time / (step + 1) * self.iter_per_epoch // 60 - spend_time // 60
+                epoch_time_min,
+                tokens_per_second
             )
         )
 
         if self.wandb is not None and (not self.ddp or dist.get_rank() == 0):
-            self.wandb.log({
-                "loss": loss.item() * self.config.accumulation_steps,
-                "lr": self.optimizer.param_groups[-1]['lr'],
-                "epoch_Time": spend_time / (step + 1) * self.iter_per_epoch // 60 - spend_time // 60
-            })
+            # 只有在wandb_log_freq步数的倍数时记录
+            if self.current_step % self.config.wandb_log_freq == 0:
+                # 基础训练指标
+                metrics = {
+                    "train/loss": loss.item() * self.config.accumulation_steps,
+                    "train/learning_rate": self.optimizer.param_groups[-1]['lr'],
+                    "train/epoch": epoch + 1,
+                    "train/step": self.current_step,
+                    "train/grad_norm": grad_norm,
+                    
+                    # 训练速度指标
+                    "speed/tokens_per_second": tokens_per_second,
+                    "speed/batch_tokens": batch_tokens,
+                    "speed/epoch_time_min": epoch_time_min,
+                    "speed/progress_percentage": (step / self.iter_per_epoch) * 100,
+                }
+                
+                # GPU资源占用指标
+                if torch.cuda.is_available():
+                    metrics.update({
+                        "gpu/memory_allocated_gb": torch.cuda.memory_allocated() / (1024 ** 3),
+                        "gpu/memory_reserved_gb": torch.cuda.memory_reserved() / (1024 ** 3),
+                        "gpu/max_memory_allocated_gb": torch.cuda.max_memory_allocated() / (1024 ** 3),
+                    })
+                    
+                    # 如果有NVIDIA-SMI，获取GPU利用率
+                    try:
+                        import subprocess
+                        result = subprocess.check_output(['nvidia-smi', '--query-gpu=utilization.gpu', '--format=csv,noheader,nounits'])
+                        gpu_utilization = float(result.decode('utf-8').strip())
+                        metrics["gpu/utilization_percent"] = gpu_utilization
+                    except (subprocess.SubprocessError, ValueError, FileNotFoundError):
+                        pass
+                
+                # 计算困惑度 (perplexity)
+                metrics["train/perplexity"] = torch.exp(torch.tensor(metrics["train/loss"])).item()
+                
+                # 记录到wandb
+                self.wandb.log(metrics)
 
     def log(self, content: str) -> None:
         """日志记录"""
@@ -541,6 +655,13 @@ def main():
     parser.add_argument("--dtype", type=str, default="bfloat16")
     parser.add_argument("--use_wandb", action="store_true")
     parser.add_argument("--wandb_project", type=str, default="Zer02LLM")
+    parser.add_argument("--wandb_run_name", type=str, default=None, help="wandb运行名称")
+    parser.add_argument("--wandb_log_model", action="store_true", help="是否记录模型权重")
+    parser.add_argument("--wandb_log_code", action="store_true", help="是否记录代码")
+    parser.add_argument("--wandb_log_freq", type=int, default=1, help="wandb记录频率(每多少步记录一次)")
+    parser.add_argument("--wandb_watch_model", action="store_true", help="是否使用wandb.watch监控模型")
+    parser.add_argument("--wandb_watch_log", type=str, default="gradients", help="wandb.watch的log参数")
+    parser.add_argument("--wandb_watch_log_freq", type=int, default=100, help="wandb.watch的log_freq参数")
     parser.add_argument("--num_workers", type=int, default=1)
     parser.add_argument("--ddp", action="store_true")
     parser.add_argument("--accumulation_steps", type=int, default=8)
@@ -604,13 +725,20 @@ def main():
         dtype=args.dtype,
         use_wandb=args.use_wandb,
         wandb_project=args.wandb_project,
+        wandb_run_name=args.wandb_run_name,
+        wandb_log_model=args.wandb_log_model,
+        wandb_log_code=args.wandb_log_code,
+        wandb_log_freq=args.wandb_log_freq,
+        wandb_watch_model=args.wandb_watch_model,
+        wandb_watch_log=args.wandb_watch_log,
+        wandb_watch_log_freq=args.wandb_watch_log_freq,
+        log_interval=args.log_interval,
+        save_interval=args.save_interval,
         num_workers=args.num_workers,
         ddp=args.ddp,
         accumulation_steps=args.accumulation_steps,
         grad_clip=args.grad_clip,
         warmup_iters=args.warmup_iters,
-        log_interval=args.log_interval,
-        save_interval=args.save_interval,
         local_rank=args.local_rank,
         save_best_only=args.save_best_only,
         save_last=args.save_last,

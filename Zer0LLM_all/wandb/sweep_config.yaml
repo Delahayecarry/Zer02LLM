@@ -1,0 +1,77 @@
+program: pretrain_sft_lora_rlhf.py
+method: bayes
+metric:
+  name: train/loss
+  goal: minimize
+parameters:
+  mode:
+    value: "pretrain"  # 可以设置为 "pretrain", "sft", "dpo"不能用这个脚本，要用sweep_config_dpo.yaml
+  
+  # 学习率搜索空间
+  learning_rate:
+    min: 1e-5
+    max: 1e-3
+    distribution: log_uniform
+  
+  # 批次大小搜索空间
+  batch_size:
+    values: [8, 16, 32, 64]
+  
+  # 梯度累积步数搜索空间
+  accumulation_steps:
+    values: [4, 8, 16, 32]
+  
+  # 优化器参数
+  grad_clip:
+    min: 0.1
+    max: 2.0
+    distribution: uniform
+  
+  warmup_iters:
+    values: [0, 100, 500, 1000]
+  
+  # 模型结构参数
+  dim:
+    value: 512  # 固定值，可以根据需要修改
+  
+  n_layers:
+    value: 8  # 固定值，可以根据需要修改
+  
+  n_heads:
+    value: 8  # 固定值，可以根据需要修改
+  
+  # 其他固定参数
+  epochs:
+    value: 1
+  
+  max_seq_len:
+    value: 512
+  
+  # 必要的wandb参数
+  use_wandb:
+    value: true
+  
+  wandb_project:
+    value: "Zer02LLM_Sweep"
+  
+  wandb_log_model:
+    value: true
+  
+  # 检查点保存参数
+  save_best_only:
+    value: true
+  
+  save_last:
+    value: true
+  
+  save_interval_steps:
+    value: 1000
+  
+  keep_checkpoint_max:
+    value: 2  # 减少保存的检查点数量，以节省空间
+
+early_terminate:
+  type: hyperband
+  min_iter: 100
+  eta: 3
+  max_iter: 1000 

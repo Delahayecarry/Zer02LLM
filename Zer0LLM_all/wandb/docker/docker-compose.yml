@@ -1,0 +1,63 @@
+version: '3'
+
+services:
+  wandb:
+    image: wandb/local:latest
+    container_name: wandb-local
+    ports:
+      - "8080:8080"
+    environment:
+      - WANDB_DISABLE_CODE=true
+      - WANDB_DISABLE_GIT=true
+      - WANDB_DISABLE_SYMLINKS=true
+      - WANDB_ENABLE_SIGNUP=true
+      - WANDB_SIGNUP_VERIFICATION=false
+      - WANDB_ADMIN_USERNAME=${WANDB_ADMIN_USERNAME:-admin}
+      - WANDB_ADMIN_PASSWORD=${WANDB_ADMIN_PASSWORD:-admin}
+      - WANDB_ADMIN_EMAIL=${WANDB_ADMIN_EMAIL:-admin@example.com}
+    volumes:
+      - wandb_data:/vol
+      - wandb_logs:/logs
+    restart: unless-stopped
+    networks:
+      - wandb-network
+
+  # 可选：添加MySQL数据库（用于生产环境）
+  # mysql:
+  #   image: mysql:8.0
+  #   container_name: wandb-mysql
+  #   environment:
+  #     - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-wandb_root_password}
+  #     - MYSQL_DATABASE=wandb
+  #     - MYSQL_USER=wandb
+  #     - MYSQL_PASSWORD=${MYSQL_PASSWORD:-wandb_password}
+  #   volumes:
+  #     - mysql_data:/var/lib/mysql
+  #   restart: unless-stopped
+  #   networks:
+  #     - wandb-network
+
+  # 可选：添加Nginx反向代理（用于SSL和域名配置）
+  # nginx:
+  #   image: nginx:latest
+  #   container_name: wandb-nginx
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   volumes:
+  #     - ./nginx/conf.d:/etc/nginx/conf.d
+  #     - ./nginx/ssl:/etc/nginx/ssl
+  #   depends_on:
+  #     - wandb
+  #   restart: unless-stopped
+  #   networks:
+  #     - wandb-network
+
+volumes:
+  wandb_data:
+  wandb_logs:
+  # mysql_data:
+
+networks:
+  wandb-network:
+    driver: bridge 

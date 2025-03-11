@@ -11,7 +11,7 @@
 - 📦 模块化设计，易于扩展
 - 🛠 内置性能优化机制
 - 🔤 支持自定义 tokenizer
-- 📊 支持 Wandb 实验追踪
+- 📊 强大的 Wandb 实验追踪与可视化
 - 🔄 支持流式推理输出
 - 💾 支持梯度累积和混合精度训练
 - 📝 支持最佳模型保存和检查点管理
@@ -88,6 +88,23 @@ python pretrain_sft_lora.py \
     --save_last \
     --save_interval_steps 1000 \
     --keep_checkpoint_max 5
+
+## GPU训练（单卡）- 启用Wandb监控
+python pretrain_sft_lora.py \
+    --mode pretrain \
+    --batch_size 32 \
+    --epochs 1 \
+    --learning_rate 5e-4 \
+    --dim 512 \
+    --n_layers 8 \
+    --accumulation_steps 8 \
+    --use_wandb \
+    --wandb_project "Zer02LLM" \
+    --wandb_log_model \
+    --wandb_log_code \
+    --wandb_watch_model \
+    --save_best_only \
+    --save_last
 
 ## GPU训练（多卡）
 torchrun --nproc_per_node=2 pretrain_sft_lora.py \
@@ -209,6 +226,12 @@ python eval_model.py --model_mode 1 --dim 512 --n_layers 8 --stream True
 - **梯度累积**: 支持大批量训练
 - **分布式训练**: 支持多GPU训练
 - **性能监控**: 支持 Wandb 实验追踪
+  - 超参数记录：学习率、优化器配置、批大小等
+  - 训练指标：损失、梯度范数、困惑度(perplexity)
+  - GPU资源监控：内存占用、GPU利用率
+  - 训练速度：每秒处理token数、训练时间估计
+  - 模型权重：自动记录检查点文件
+  - 代码与配置：可选记录代码文件和完整配置
 - **流式生成**: 支持流式文本生成
 - **检查点管理**: 支持最佳模型保存和自动清理
 
@@ -219,53 +242,30 @@ python eval_model.py --model_mode 1 --dim 512 --n_layers 8 --stream True
 - **自动清理**: 自动删除旧的检查点以节省空间
 - **数量控制**: 可配置保留的最大检查点数量
 
-## 显存优化配置
+### 5. Wandb监控
+- 使用`--use_wandb`启用Wandb监控
+- 使用`--wandb_log_model`记录模型权重
+- 使用`--wandb_log_code`记录代码文件
+- 调整`--wandb_log_freq`控制记录频率
+- 使用`--wandb_watch_model`监控模型梯度
+
+### 6. 超参数搜索
+- 使用Weights & Biases Sweeps进行自动化超参数优化
+- 支持贝叶斯优化、网格搜索和随机搜索
+- 自动早停机制，节省计算资源
+- 可视化超参数重要性和相关性
+- 支持不同训练模式的专用配置
 
 ```bash
-# 16GB显存配置
-python pretrain_sft_lora.py --mode pretrain --dim 512 --n_layers 8 --batch_size 16 --accumulation_steps 16
+# 启动预训练模式的超参数搜索（运行10次实验）
+python run_sweep.py --config sweep_config.yaml --count 10 --mode pretrain
 
-# 24GB显存配置
-python pretrain_sft_lora.py --mode pretrain --dim 768 --n_layers 12 --batch_size 24 --accumulation_steps 8
+# 启动DPO模式的超参数搜索（运行5次实验）
+python run_sweep.py --config sweep_config_dpo.yaml --count 5 --mode dpo
 
-# 40GB显存配置
-python pretrain_sft_lora.py --mode pretrain --dim 1024 --n_layers 16 --batch_size 32 --accumulation_steps 4
-
-# DPO训练 16GB显存配置
-python pretrain_sft_lora.py --mode dpo --dim 512 --n_layers 8 --batch_size 4 --accumulation_steps 8 --max_seq_len 2048
-
-# DPO训练 24GB显存配置
-python pretrain_sft_lora.py --mode dpo --dim 768 --n_layers 12 --batch_size 6 --accumulation_steps 6 --max_seq_len 2048
-
-# DPO训练 40GB显存配置
-python pretrain_sft_lora.py --mode dpo --dim 1024 --n_layers 16 --batch_size 8 --accumulation_steps 4 --max_seq_len 3000
+# 在特定GPU上运行超参数搜索
+python run_sweep.py --config sweep_config.yaml --count 3 --gpu 0,1
 ```
-
-## 常见问题解决
-
-### 1. 显存不足
-- 减小 batch_size
-- 增加 accumulation_steps
-- 减小模型维度或层数
-- 使用 float16/bfloat16 精度
-
-### 2. 训练速度优化
-- 启用 Flash Attention
-- 使用分布式训练
-- 优化数据加载（增加 num_workers）
-- 使用混合精度训练
-
-### 3. 训练稳定性
-- 调整学习率
-- 使用 warmup
-- 启用梯度裁剪
-- 调整 batch_size 和 accumulation_steps
-
-### 4. 检查点管理
-- 合理设置保存间隔
-- 控制检查点数量
-- 及时清理旧检查点
-- 保存最佳模型
 
 ## 参数说明
 
@@ -324,6 +324,13 @@ python pretrain_sft_lora.py --mode dpo --dim 1024 --n_layers 16 --batch_size 8 -
 |------|------|--------|--------|
 | use_wandb | 是否使用wandb | False | True/False |
 | wandb_project | wandb项目名 | Zer02LLM | 字符串 |
+| wandb_run_name | wandb运行名称 | None | 字符串/None |
+| wandb_log_model | 是否记录模型权重 | False | True/False |
+| wandb_log_code | 是否记录代码 | False | True/False |
+| wandb_log_freq | wandb记录频率 | 1 | 正整数 |
+| wandb_watch_model | 是否监控模型梯度 | False | True/False |
+| wandb_watch_log | wandb.watch的log参数 | gradients | gradients/all/None |
+| wandb_watch_log_freq | wandb.watch的log_freq | 100 | 正整数 |
 | log_interval | 日志记录间隔 | 100 | 正整数 |
 | save_interval | 保存间隔 | 100 | 正整数 |
 
@@ -386,4 +393,77 @@ python pretrain_sft_lora.py --mode dpo --dim 1024 --n_layers 16 --batch_size 8 -
 | 参数 | 说明 | 默认值 | 可选值 |
 |------|------|--------|--------|
 | data_path | 训练数据路径 | ./dataset/pretrain_hq.jsonl | 有效文件路径 |
+
+## 显存优化配置
+
+```bash
+# 16GB显存配置
+python pretrain_sft_lora.py --mode pretrain --dim 512 --n_layers 8 --batch_size 16 --accumulation_steps 16
+
+# 24GB显存配置
+python pretrain_sft_lora.py --mode pretrain --dim 768 --n_layers 12 --batch_size 24 --accumulation_steps 8
+
+# 40GB显存配置
+python pretrain_sft_lora.py --mode pretrain --dim 1024 --n_layers 16 --batch_size 32 --accumulation_steps 4
+
+# DPO训练 16GB显存配置
+python pretrain_sft_lora.py --mode dpo --dim 512 --n_layers 8 --batch_size 4 --accumulation_steps 8 --max_seq_len 2048
+
+# DPO训练 24GB显存配置
+python pretrain_sft_lora.py --mode dpo --dim 768 --n_layers 12 --batch_size 6 --accumulation_steps 6 --max_seq_len 2048
+
+# DPO训练 40GB显存配置
+python pretrain_sft_lora.py --mode dpo --dim 1024 --n_layers 16 --batch_size 8 --accumulation_steps 4 --max_seq_len 3000
+```
+
+## 常见问题解决
+
+### 1. 显存不足
+- 减小 batch_size
+- 增加 accumulation_steps
+- 减小模型维度或层数
+- 使用 float16/bfloat16 精度
+
+### 2. 训练速度优化
+- 启用 Flash Attention
+- 使用分布式训练
+- 优化数据加载（增加 num_workers）
+- 使用混合精度训练
+
+### 3. 训练稳定性
+- 调整学习率
+- 使用 warmup
+- 启用梯度裁剪
+- 调整 batch_size 和 accumulation_steps
+
+### 4. 检查点管理
+- 合理设置保存间隔
+- 控制检查点数量
+- 及时清理旧检查点
+- 保存最佳模型
+
+### 5. Wandb监控
+- 使用`--use_wandb`启用Wandb监控
+- 使用`--wandb_log_model`记录模型权重
+- 使用`--wandb_log_code`记录代码文件
+- 调整`--wandb_log_freq`控制记录频率
+- 使用`--wandb_watch_model`监控模型梯度
+
+### 6. 超参数搜索
+- 使用Weights & Biases Sweeps进行自动化超参数优化
+- 支持贝叶斯优化、网格搜索和随机搜索
+- 自动早停机制，节省计算资源
+- 可视化超参数重要性和相关性
+- 支持不同训练模式的专用配置
+
+```bash
+# 启动预训练模式的超参数搜索（运行10次实验）
+python run_sweep.py --config sweep_config.yaml --count 10 --mode pretrain
+
+# 启动DPO模式的超参数搜索（运行5次实验）
+python run_sweep.py --config sweep_config_dpo.yaml --count 5 --mode dpo
+
+# 在特定GPU上运行超参数搜索
+python run_sweep.py --config sweep_config.yaml --count 3 --gpu 0,1
+```
 
