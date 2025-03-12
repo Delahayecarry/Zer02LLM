@@ -175,14 +175,7 @@ class Trainer:
             if self.config.wandb_log_code:
                 wandb.run.log_code(".", include_fn=lambda path: path.endswith(".py"))
                 
-            # 监控模型
-            if self.config.wandb_watch_model:
-                wandb.watch(
-                    self.model,
-                    log=self.config.wandb_watch_log,
-                    log_freq=self.config.wandb_watch_log_freq
-                )
-                
+            # 注意：wandb.watch(self.model) 将在模型初始化后单独处理
             self.log(f"Wandb initialized: {wandb.run.name}")
         else:
             self.wandb = None
@@ -249,6 +242,15 @@ class Trainer:
                 self.ref_model.requires_grad_(False)
             
         self.log(f'LLM总参数量：{sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.3f} 百万')
+        
+        # 在模型初始化后设置wandb监控
+        if self.wandb is not None and self.config.wandb_watch_model:
+            self.wandb.watch(
+                model,
+                log=self.config.wandb_watch_log,
+                log_freq=self.config.wandb_watch_log_freq
+            )
+            
         return model, tokenizer
 
     def setup_training(self) -> None:
@@ -350,60 +352,101 @@ class Trainer:
             # 如果是按步数保存
             if not is_last and self.current_step % self.config.save_interval_steps == 0:
                 checkpoint_path = self.get_checkpoint_path('step', self.current_step)
-                torch.save(state_dict, checkpoint_path)
-                self.saved_checkpoints.append(checkpoint_path)
-                
-                # 如果超过最大保存数量,删除最旧的检查点
-                while len(self.saved_checkpoints) > self.config.keep_checkpoint_max:
-                    oldest_checkpoint = self.saved_checkpoints.pop(0)
-                    if os.path.exists(oldest_checkpoint):
-                        os.remove(oldest_checkpoint)
-                
-                self.log(f"保存步数检查点: {checkpoint_path}")
-                
-                # 记录模型权重到wandb
-                if self.wandb is not None and self.config.wandb_log_model:
-                    artifact = self.wandb.Artifact(
-                        name=f"model-step-{self.current_step}", 
-                        type="model",
-                        description=f"Model checkpoint at step {self.current_step}"
-                    )
-                    artifact.add_file(checkpoint_path)
-                    self.wandb.log_artifact(artifact)
+                try:
+                    # 检查磁盘空间
+                    import shutil
+                    total, used, free = shutil.disk_usage(os.path.dirname(checkpoint_path))
+                    # 估计模型大小 (以字节为单位)
+                    model_size_estimate = sum(p.numel() * p.element_size() for p in self.model.parameters())
+                    
+                    # 如果可用空间小于模型大小的1.5倍，发出警告但继续尝试保存
+                    if free < model_size_estimate * 1.5:
+                        self.log(f"警告: 磁盘空间不足! 可用: {free / (1024**3):.2f} GB, 估计需要: {model_size_estimate / (1024**3):.2f} GB")
+                    
+                    torch.save(state_dict, checkpoint_path)
+                    self.saved_checkpoints.append(checkpoint_path)
+                    
+                    # 如果超过最大保存数量,删除最旧的检查点
+                    while len(self.saved_checkpoints) > self.config.keep_checkpoint_max:
+                        oldest_checkpoint = self.saved_checkpoints.pop(0)
+                        if os.path.exists(oldest_checkpoint):
+                            os.remove(oldest_checkpoint)
+                    
+                    self.log(f"保存步数检查点: {checkpoint_path}")
+                    
+                    # 记录模型权重到wandb
+                    if self.wandb is not None and self.config.wandb_log_model:
+                        try:
+                            artifact = self.wandb.Artifact(
+                                name=f"model-step-{self.current_step}", 
+                                type="model",
+                                description=f"Model checkpoint at step {self.current_step}"
+                            )
+                            artifact.add_file(checkpoint_path)
+                            self.wandb.log_artifact(artifact)
+                        except OSError as e:
+                            if "No space left on device" in str(e):
+                                self.log(f"警告: 磁盘空间不足，无法上传模型到wandb: {e}")
+                                # 禁用后续的wandb模型上传
+                                self.config.wandb_log_model = False
+                            else:
+                                self.log(f"wandb上传模型时出错: {e}")
+                except Exception as e:
+                    self.log(f"保存检查点时出错: {e}")
             
             # 如果有loss且是最佳loss,保存最佳模型
             if loss is not None and loss.item() < self.best_loss:
                 self.best_loss = loss.item()
                 if self.config.save_best_only:
                     best_path = self.get_checkpoint_path('best')
-                    torch.save(state_dict, best_path)
-                    self.log(f"保存最佳模型: {best_path}, loss: {self.best_loss:.6f}")
-                    
-                    # 记录最佳模型到wandb
-                    if self.wandb is not None and self.config.wandb_log_model:
-                        artifact = self.wandb.Artifact(
-                            name="model-best", 
-                            type="model",
-                            description=f"Best model with loss {self.best_loss:.6f}"
-                        )
-                        artifact.add_file(best_path)
-                        self.wandb.log_artifact(artifact)
+                    try:
+                        torch.save(state_dict, best_path)
+                        self.log(f"保存最佳模型: {best_path}, loss: {self.best_loss:.6f}")
+                        
+                        # 记录最佳模型到wandb
+                        if self.wandb is not None and self.config.wandb_log_model:
+                            try:
+                                artifact = self.wandb.Artifact(
+                                    name="model-best", 
+                                    type="model",
+                                    description=f"Best model with loss {self.best_loss:.6f}"
+                                )
+                                artifact.add_file(best_path)
+                                self.wandb.log_artifact(artifact)
+                            except OSError as e:
+                                if "No space left on device" in str(e):
+                                    self.log(f"警告: 磁盘空间不足，无法上传模型到wandb: {e}")
+                                    # 禁用后续的wandb模型上传
+                                    self.config.wandb_log_model = False
+                                else:
+                                    self.log(f"wandb上传模型时出错: {e}")
+                    except Exception as e:
+                        self.log(f"保存最佳模型时出错: {e}")
             
             # 如果是最后一个epoch且需要保存最后的模型
             if is_last and self.config.save_last:
                 last_path = self.get_checkpoint_path('last')
-                torch.save(state_dict, last_path)
-                self.log(f"保存最终模型: {last_path}")
-                
-                # 记录最终模型到wandb
-                if self.wandb is not None and self.config.wandb_log_model:
-                    artifact = self.wandb.Artifact(
-                        name="model-last", 
-                        type="model",
-                        description="Final model checkpoint"
-                    )
-                    artifact.add_file(last_path)
-                    self.wandb.log_artifact(artifact)
+                try:
+                    torch.save(state_dict, last_path)
+                    self.log(f"保存最终模型: {last_path}")
+                    
+                    # 记录最终模型到wandb
+                    if self.wandb is not None and self.config.wandb_log_model:
+                        try:
+                            artifact = self.wandb.Artifact(
+                                name="model-last", 
+                                type="model",
+                                description="Final model checkpoint"
+                            )
+                            artifact.add_file(last_path)
+                            self.wandb.log_artifact(artifact)
+                        except OSError as e:
+                            if "No space left on device" in str(e):
+                                self.log(f"警告: 磁盘空间不足，无法上传模型到wandb: {e}")
+                            else:
+                                self.log(f"wandb上传模型时出错: {e}")
+                except Exception as e:
+                    self.log(f"保存最终模型时出错: {e}")
             
             self.model.train()
             

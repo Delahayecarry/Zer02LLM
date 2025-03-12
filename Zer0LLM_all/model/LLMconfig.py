@@ -77,8 +77,14 @@ class LLMconfig(PretrainedConfig):
         self.n_shared_experts = n_shared_experts
         self.scoring_func = scoring_func
         
+        # 添加num_experts属性，与n_routed_experts保持一致
+        self.num_experts = n_routed_experts
+        
         # MoE损失和优化相关参数
         self.aux_loss_alpha = aux_loss_alpha
         self.seq_aux = seq_aux
         self.norm_topk_prob = norm_topk_prob
+        
+        # 添加norm_topk_experts属性，与norm_topk_prob保持一致
+        self.norm_topk_experts = norm_topk_prob
         ####################################################
